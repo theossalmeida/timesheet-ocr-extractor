@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import io
 import json
 import logging
@@ -187,8 +188,16 @@ async def _ocr_chunk(chunk_bytes: bytes) -> list[str]:
     return [p.get("markdown", "") for p in pages]
 
 
+_CHAT_MAX_RETRIES = 5
+_CHAT_DEFAULT_WAIT = 60  # seconds to wait when Retry-After header is absent
+
+
 async def _extract_from_markdown(pages: list[str]) -> list[dict]:
-    """Call Mistral small chat to extract structured records from OCR markdown."""
+    """Call Mistral small chat to extract structured records from OCR markdown.
+
+    Retries up to _CHAT_MAX_RETRIES times on 429 rate-limit responses,
+    honouring the Retry-After header when present.
+    """
     text = "\n\n---PAGE BREAK---\n\n".join(p for p in pages if p.strip())
     if not text:
         return []
@@ -209,10 +218,22 @@ async def _extract_from_markdown(pages: list[str]) -> list[dict]:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        response = await client.post(MISTRAL_CHAT_URL, headers=headers, json=body)
+    for attempt in range(_CHAT_MAX_RETRIES + 1):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            response = await client.post(MISTRAL_CHAT_URL, headers=headers, json=body)
 
-    if response.status_code != 200:
+        if response.status_code == 200:
+            return _parse_chat_response(response.json())
+
+        if response.status_code == 429 and attempt < _CHAT_MAX_RETRIES:
+            wait = int(response.headers.get("retry-after", _CHAT_DEFAULT_WAIT))
+            logger.warning(
+                "guia: chat rate limited — waiting %ds (attempt %d/%d)",
+                wait, attempt + 1, _CHAT_MAX_RETRIES,
+            )
+            await asyncio.sleep(wait)
+            continue
+
         logger.error(
             "guia: Mistral chat error — status=%d body=%s",
             response.status_code,
@@ -222,7 +243,7 @@ async def _extract_from_markdown(pages: list[str]) -> list[dict]:
             f"Mistral chat error {response.status_code}: {response.text[:300]}"
         )
 
-    return _parse_chat_response(response.json())
+    return []  # unreachable; satisfies type checker
 
 
 async def _process_chunk(chunk_bytes: bytes) -> list[dict]:
