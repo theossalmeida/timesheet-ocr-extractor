@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import re
 from datetime import datetime
 
 import openpyxl
@@ -82,7 +83,9 @@ def build_guia_excel(rows: list[TimesheetRow]) -> bytes:
     guia_widths = [12, 10, 10]
 
     for worker_name, worker_rows in workers.items():
-        sheet_title = worker_name[:31]  # Excel tab limit
+        # Excel forbids / \ ? * [ ] : in sheet titles; strip them and cap at 31 chars
+        safe = re.sub(r"[/\\?*\[\]:]", " ", worker_name).strip()
+        sheet_title = safe[:31] or "MOTORISTA"
         ws = wb.create_sheet(sheet_title)
 
         # Header
