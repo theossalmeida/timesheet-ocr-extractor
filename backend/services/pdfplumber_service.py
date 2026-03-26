@@ -1,8 +1,11 @@
 from __future__ import annotations
 import io
+import logging
 import re
 
 import pdfplumber
+
+logger = logging.getLogger(__name__)
 
 from models.timesheet import TimesheetRow
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia, _PT_MONTHS
@@ -140,6 +143,7 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
     pdf = None
     try:
         pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+        logger.info("pdfplumber: opened PDF — pages=%d", len(pdf.pages))
         all_rows: list[TimesheetRow] = []
 
         for page in pdf.pages:
@@ -176,6 +180,7 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
                         ocorrencia_tipo=occ_tipo,
                     ))
 
+        logger.info("pdfplumber: structured table — rows=%d", len(all_rows))
         if all_rows:
             return all_rows
 
@@ -193,6 +198,7 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
                         cell_str = str(cell)
                         if "\n" in cell_str and _MULTIROW_DATE_RE.search(cell_str):
                             multirow_rows.extend(_parse_multirow_cell(cell_str))
+        logger.info("pdfplumber: multirow cell — rows=%d", len(multirow_rows))
         if multirow_rows:
             return multirow_rows
 
@@ -203,6 +209,7 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
             (page.extract_text() or "") for page in pdf.pages
         )
         text_rows = _parse_text_rows(full_text)
+        logger.info("pdfplumber: text fallback — rows=%d", len(text_rows))
         return text_rows if text_rows else None
     finally:
         if pdf is not None:

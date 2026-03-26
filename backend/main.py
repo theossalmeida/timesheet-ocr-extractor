@@ -1,10 +1,12 @@
-from __future__ import annotations
 import io
 import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from config import settings
 from models.timesheet import ExtractionResult
@@ -18,6 +20,8 @@ from utils.validators import validate_result, validate_row
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
+
 app = FastAPI(
     title="Timesheet Extractor",
     description="Extrai registros de ponto de PDFs trabalhistas e gera Excel.",
@@ -30,6 +34,9 @@ app.add_middleware(
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.exception_handler(HTTPException)
@@ -104,7 +111,13 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
         row_warnings.extend(validate_row(row))
     result_warnings = validate_result(rows)
 
-    logger.info("Extracted %d rows via %s", len(rows), provider)
+    logger.info(
+        "Extraction complete — provider=%s rows=%d pdf_type=%s warnings=%d",
+        provider,
+        len(rows),
+        pdf_type,
+        len(row_warnings + result_warnings),
+    )
 
     result = ExtractionResult(
         rows=rows,
@@ -122,8 +135,14 @@ async def health():
 
 
 @app.post("/extract")
-async def extract(file: UploadFile = File(...)):
+@limiter.limit("10/minute")
+async def extract(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
+    logger.info(
+        "POST /extract — filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
     _validate_pdf(pdf_bytes, len(pdf_bytes))
 
     result, provider = await _run_pipeline(pdf_bytes)
@@ -142,8 +161,14 @@ async def extract(file: UploadFile = File(...)):
 
 
 @app.post("/preview")
-async def preview(file: UploadFile = File(...)):
+@limiter.limit("10/minute")
+async def preview(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
+    logger.info(
+        "POST /preview — filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
     _validate_pdf(pdf_bytes, len(pdf_bytes))
 
     result, _ = await _run_pipeline(pdf_bytes)

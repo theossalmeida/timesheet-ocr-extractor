@@ -45,7 +45,7 @@ export function ProgressIndicator({
           <a
             href={resultUrl}
             download="timesheet.xlsx"
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 sm:w-auto"
           >
             Baixar planilha Excel
           </a>

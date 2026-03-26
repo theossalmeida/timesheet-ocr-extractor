@@ -1,6 +1,9 @@
 from __future__ import annotations
+import logging
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from config import settings
 from models.timesheet import TimesheetRow
@@ -17,6 +20,7 @@ class MistralExtractionError(Exception):
 async def extract_with_mistral(pdf_bytes: bytes) -> list[TimesheetRow]:
     headers = {"Authorization": f"Bearer {settings.MISTRAL_API_KEY}"}
 
+    logger.info("Calling Mistral OCR — pdf_size=%d bytes", len(pdf_bytes))
     async with httpx.AsyncClient(timeout=httpx.Timeout(90.0)) as client:
         # Phase 1: upload PDF
         upload_response = await client.post(
@@ -26,6 +30,7 @@ async def extract_with_mistral(pdf_bytes: bytes) -> list[TimesheetRow]:
             data={"purpose": "ocr"},
         )
         if upload_response.status_code != 200:
+            logger.error("Mistral file upload failed — status=%d", upload_response.status_code)
             raise MistralExtractionError(
                 f"Mistral file upload failed {upload_response.status_code}: "
                 f"{upload_response.text[:300]}"
@@ -43,6 +48,7 @@ async def extract_with_mistral(pdf_bytes: bytes) -> list[TimesheetRow]:
             },
         )
         if ocr_response.status_code != 200:
+            logger.error("Mistral OCR failed — status=%d", ocr_response.status_code)
             raise MistralExtractionError(
                 f"Mistral OCR failed {ocr_response.status_code}: "
                 f"{ocr_response.text[:300]}"
@@ -50,6 +56,7 @@ async def extract_with_mistral(pdf_bytes: bytes) -> list[TimesheetRow]:
 
     pages = ocr_response.json().get("pages", [])
     full_markdown = "\n\n".join(p.get("markdown", "") for p in pages)
+    logger.info("Mistral OCR complete — pages=%d total_chars=%d", len(pages), len(full_markdown))
 
     # Phase 3: normalize via Gemini
     try:

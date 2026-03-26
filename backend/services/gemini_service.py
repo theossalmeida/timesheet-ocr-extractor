@@ -1,9 +1,12 @@
 from __future__ import annotations
 import base64
 import json
+import logging
 import re
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from config import settings
 from models.timesheet import TimesheetRow
@@ -62,6 +65,7 @@ def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
     except (KeyError, IndexError) as e:
         raise GeminiExtractionError(f"Unexpected Gemini response structure: {e}") from e
     except json.JSONDecodeError as e:
+        logger.warning("Gemini JSON parse failed — attempting truncation recovery: %s", e)
         # Try truncating to last valid complete object
         last_bracket = text.rfind("},")
         if last_bracket > 0:
@@ -88,6 +92,7 @@ def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
 
 
 async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
+    logger.info("Calling Gemini extract API — pdf_size=%d bytes", len(pdf_bytes))
     encoded = base64.b64encode(pdf_bytes).decode("utf-8")
     body = {
         "contents": [{
@@ -109,6 +114,11 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
             json=body,
         )
     if response.status_code != 200:
+        logger.error(
+            "Gemini API error — status=%d body=%s",
+            response.status_code,
+            response.text[:300],
+        )
         raise GeminiExtractionError(
             f"Gemini API error {response.status_code}: {response.text[:300]}"
         )
@@ -116,6 +126,7 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
 
 
 async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
+    logger.info("Calling Gemini normalize API — text_len=%d chars", len(ocr_text))
     body = {
         "contents": [{
             "parts": [{"text": NORMALIZE_PROMPT + ocr_text}]
@@ -133,6 +144,11 @@ async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
             json=body,
         )
     if response.status_code != 200:
+        logger.error(
+            "Gemini normalization error — status=%d body=%s",
+            response.status_code,
+            response.text[:300],
+        )
         raise GeminiExtractionError(
             f"Gemini normalization error {response.status_code}: {response.text[:300]}"
         )
