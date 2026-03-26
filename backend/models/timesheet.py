@@ -25,11 +25,12 @@ class TimesheetRow(BaseModel):
     saida_2: str | None = None
     ocorrencia_raw: str | None = None
     ocorrencia_tipo: OcorrenciaTipo | None = None
+    worker_name: str | None = None
 
 
 class ExtractionResult(BaseModel):
     rows: list[TimesheetRow]
-    provider: Literal["pdfplumber", "gemini", "mistral", "pdfplumber+gemini", "pdfplumber+mistral"]
+    provider: Literal["pdfplumber", "gemini", "mistral", "pdfplumber+gemini", "pdfplumber+mistral", "gemini-guia"]
     pdf_type: Literal["native", "scanned", "mixed"]
     warnings: list[str] = []
     total_rows: int = 0
