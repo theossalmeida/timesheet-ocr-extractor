@@ -29,7 +29,7 @@ class TimesheetRow(BaseModel):
 
 class ExtractionResult(BaseModel):
     rows: list[TimesheetRow]
-    provider: Literal["pdfplumber", "gemini", "mistral"]
+    provider: Literal["pdfplumber", "gemini", "mistral", "pdfplumber+gemini", "pdfplumber+mistral"]
     pdf_type: Literal["native", "scanned", "mixed"]
     warnings: list[str] = []
     total_rows: int = 0
