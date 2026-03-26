@@ -39,29 +39,45 @@ export function useExtraction(): ExtractionHook {
         error: null,
       });
 
-      const stages: Array<[number, string]> = [
-        [10, "Enviando arquivo..."],
-        [20, "Arquivo recebido. Analisando PDF..."],
-        [40, "Extraindo registros..."],
-        [60, "Processando dados..."],
-        [75, "Gerando arquivos..."],
-      ];
-
-      let stageIndex = 0;
-      const interval = setInterval(() => {
-        if (stageIndex < stages.length) {
-          const [progress, label] = stages[stageIndex];
-          setProgress(progress, label);
-          stageIndex++;
-        } else {
-          clearInterval(interval);
-        }
-      }, 600);
-
       setState((s) => ({ ...s, status: "processing" }));
 
+      // Cartão de ponto: simulate progress stages (single blocking call)
+      // Guia ministerial: real per-chunk progress via SSE — no simulation needed
+      let interval: ReturnType<typeof setInterval> | undefined;
+
+      if (mode !== "guia") {
+        const stages: Array<[number, string]> = [
+          [10, "Enviando arquivo..."],
+          [20, "Arquivo recebido. Analisando PDF..."],
+          [40, "Extraindo registros..."],
+          [60, "Processando dados..."],
+          [75, "Gerando arquivos..."],
+        ];
+        let stageIndex = 0;
+        interval = setInterval(() => {
+          if (stageIndex < stages.length) {
+            const [progress, label] = stages[stageIndex];
+            setProgress(progress, label);
+            stageIndex++;
+          } else {
+            clearInterval(interval);
+          }
+        }, 600);
+      } else {
+        setProgress(10, "Enviando arquivo...");
+      }
+
       try {
-        const result = await (mode === "guia" ? extractGuia(file) : extractTimesheet(file));
+        const handleGuiaProgress = (chunk: number, total: number) => {
+          const pct = Math.round((chunk / total) * 80) + 10;
+          setProgress(pct, `Processando chunk ${chunk} de ${total}...`);
+        };
+
+        const result = await (
+          mode === "guia"
+            ? extractGuia(file, handleGuiaProgress)
+            : extractTimesheet(file)
+        );
         clearInterval(interval);
 
         setProgress(95, "Quase pronto...");
@@ -85,7 +101,7 @@ export function useExtraction(): ExtractionHook {
           error: null,
         });
       } catch (err) {
-        clearInterval(interval);
+        if (interval) clearInterval(interval);
         const message =
           err instanceof ApiError
             ? err.message

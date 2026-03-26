@@ -253,6 +253,66 @@ async def _process_chunk(chunk_bytes: bytes) -> list[dict]:
     return await _extract_from_markdown(pages)
 
 
+async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_size: int = CHUNK_SIZE):
+    """Async generator yielding SSE strings for the guia ministerial extraction.
+
+    Emits:
+      data: {"type":"progress","chunk":N,"total":T}\\n\\n  — before each chunk starts
+      : keep-alive\\n\\n                                    — every 15 s while a chunk runs
+      data: {"type":"done", ...bundle...}\\n\\n             — on success
+      data: {"type":"error","message":"..."}\\n\\n          — on any failure
+    """
+    import base64 as _b64
+    from services.excel_builder import build_guia_excel
+    from services.csv_builder import build_guia_csv
+
+    try:
+        chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
+        total = len(chunks)
+        all_records: list[dict] = []
+
+        for i, chunk in enumerate(chunks):
+            yield f"data: {json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total})}\n\n"
+
+            task = asyncio.create_task(_process_chunk(chunk))
+            while not task.done():
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(15)
+
+            exc = task.exception()
+            if exc is not None:
+                logger.error("guia stream: chunk %d failed — %s", i + 1, exc)
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+                return
+
+            all_records.extend(task.result())
+
+        rows = _aggregate(all_records)
+
+        if not rows:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Nenhum registro encontrado nas guias ministeriais.'})}\n\n"
+            return
+
+        excel_bytes = build_guia_excel(rows)
+        csv_bytes, csv_mime = build_guia_csv(rows)
+        csv_ext = "zip" if csv_mime == "application/zip" else "csv"
+
+        yield "data: " + json.dumps({
+            "type": "done",
+            "excel_b64": _b64.b64encode(excel_bytes).decode(),
+            "excel_filename": f"guia_{original_stem}.xlsx",
+            "csv_b64": _b64.b64encode(csv_bytes).decode(),
+            "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
+            "csv_mime": csv_mime,
+            "rows_extracted": len(rows),
+            "provider": "gemini-guia",
+        }, ensure_ascii=False) + "\n\n"
+
+    except Exception as e:
+        logger.exception("guia stream: unexpected error — %s", e)
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Erro interno ao processar guias ministeriais.'})}\n\n"
+
+
 async def extract_with_guia_ministerial(
     pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE
 ) -> list[TimesheetRow]:

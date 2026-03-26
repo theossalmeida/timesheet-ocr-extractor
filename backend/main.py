@@ -4,16 +4,16 @@ import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config import settings
 from models.timesheet import ExtractionResult
-from services.csv_builder import build_csv, build_guia_csv
-from services.excel_builder import build_excel, build_guia_excel
-from services.guia_ministerial_service import GuiaExtractionError, extract_with_guia_ministerial
+from services.csv_builder import build_csv
+from services.excel_builder import build_excel
+from services.guia_ministerial_service import stream_guia_extraction
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
 from services.mistral_service import MistralExtractionError, extract_with_mistral
 from services.pdf_detector import detect_pdf_type
@@ -219,39 +219,15 @@ async def extract_guia(request: Request, file: UploadFile = File(...)):
     )
     _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
 
-    try:
-        rows = await extract_with_guia_ministerial(pdf_bytes)
-    except GuiaExtractionError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    if not rows:
-        raise HTTPException(
-            status_code=422,
-            detail="Nenhum registro encontrado nas guias ministeriais.",
-        )
-
-    excel_bytes = build_guia_excel(rows)
-    csv_bytes, csv_mime = build_guia_csv(rows)
-
     original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
-    csv_ext = "zip" if csv_mime == "application/zip" else "csv"
-    n_workers = len({r.worker_name for r in rows})
 
-    return JSONResponse(
-        content={
-            "excel_b64": base64.b64encode(excel_bytes).decode(),
-            "excel_filename": f"guia_{original_stem}.xlsx",
-            "csv_b64": base64.b64encode(csv_bytes).decode(),
-            "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
-            "csv_mime": csv_mime,
-            "rows_extracted": len(rows),
-            "provider": "gemini-guia",
-            "pdf_type": "scanned",
-        },
+    return StreamingResponse(
+        stream_guia_extraction(pdf_bytes, original_stem),
+        media_type="text/event-stream",
         headers={
-            "X-Provider-Used": "gemini-guia",
-            "X-Rows-Extracted": str(len(rows)),
-            "X-Workers-Found": str(n_workers),
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 
