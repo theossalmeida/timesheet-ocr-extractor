@@ -31,6 +31,7 @@ export default function Home() {
               progress={extraction.progress}
               stepLabel={extraction.stepLabel}
               resultUrl={extraction.resultUrl}
+              csvUrl={extraction.csvUrl}
               rowCount={extraction.rowCount}
             />
           )}

@@ -23,7 +23,7 @@ export interface TimesheetRow {
 
 export interface ExtractionResult {
   rows: TimesheetRow[];
-  provider: "pdfplumber" | "gemini" | "mistral";
+  provider: "pdfplumber" | "gemini" | "mistral" | "pdfplumber+gemini" | "pdfplumber+mistral";
   pdf_type: "native" | "scanned" | "mixed";
   warnings: string[];
   total_rows: number;
@@ -41,6 +41,7 @@ export interface ExtractionState {
   progress: number;
   stepLabel: string;
   resultUrl: string | null;
+  csvUrl: string | null;
   rowCount: number | null;
   provider: string | null;
   error: string | null;

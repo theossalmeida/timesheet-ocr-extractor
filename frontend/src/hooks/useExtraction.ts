@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { extractTimesheet, ApiError } from "@/lib/api";
+import { extractTimesheet, extractTimesheetCSV, ApiError } from "@/lib/api";
 import type { ExtractionHook, ExtractionState } from "@/lib/types";
 
 const IDLE_STATE: ExtractionState = {
@@ -9,6 +9,7 @@ const IDLE_STATE: ExtractionState = {
   progress: 0,
   stepLabel: "",
   resultUrl: null,
+  csvUrl: null,
   rowCount: null,
   provider: null,
   error: null,
@@ -17,6 +18,7 @@ const IDLE_STATE: ExtractionState = {
 export function useExtraction(): ExtractionHook {
   const [state, setState] = useState<ExtractionState>(IDLE_STATE);
   const resultUrlRef = useRef<string | null>(null);
+  const csvUrlRef = useRef<string | null>(null);
 
   const setProgress = useCallback((progress: number, stepLabel: string) => {
     setState((s) => ({ ...s, progress, stepLabel }));
@@ -29,6 +31,7 @@ export function useExtraction(): ExtractionHook {
         progress: 0,
         stepLabel: "Enviando arquivo...",
         resultUrl: null,
+        csvUrl: null,
         rowCount: null,
         provider: null,
         error: null,
@@ -40,7 +43,7 @@ export function useExtraction(): ExtractionHook {
         [20, "Arquivo recebido. Analisando PDF...", 500],
         [40, "Extraindo registros...", 800],
         [60, "Processando dados...", 600],
-        [75, "Gerando planilha Excel...", 400],
+        [75, "Gerando arquivos...", 400],
       ];
 
       let stageIndex = 0;
@@ -57,22 +60,29 @@ export function useExtraction(): ExtractionHook {
       setState((s) => ({ ...s, status: "processing" }));
 
       try {
-        const { blob, provider, rowCount } = await extractTimesheet(file);
+        const [excelResult, csvBlob] = await Promise.all([
+          extractTimesheet(file),
+          extractTimesheetCSV(file),
+        ]);
         clearInterval(interval);
 
         setProgress(95, "Quase pronto...");
         await new Promise((r) => setTimeout(r, 300));
 
-        const url = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(excelResult.blob);
         resultUrlRef.current = url;
+
+        const csvUrl = URL.createObjectURL(csvBlob);
+        csvUrlRef.current = csvUrl;
 
         setState({
           status: "done",
           progress: 100,
-          stepLabel: `${rowCount} registros foram extraídos!`,
+          stepLabel: `${excelResult.rowCount} registros foram extraídos!`,
           resultUrl: url,
-          rowCount,
-          provider,
+          csvUrl,
+          rowCount: excelResult.rowCount,
+          provider: excelResult.provider,
           error: null,
         });
       } catch (err) {
@@ -86,6 +96,7 @@ export function useExtraction(): ExtractionHook {
           progress: 0,
           stepLabel: "",
           resultUrl: null,
+          csvUrl: null,
           rowCount: null,
           provider: null,
           error: message,
@@ -99,6 +110,10 @@ export function useExtraction(): ExtractionHook {
     if (resultUrlRef.current) {
       URL.revokeObjectURL(resultUrlRef.current);
       resultUrlRef.current = null;
+    }
+    if (csvUrlRef.current) {
+      URL.revokeObjectURL(csvUrlRef.current);
+      csvUrlRef.current = null;
     }
     setState(IDLE_STATE);
   }, []);

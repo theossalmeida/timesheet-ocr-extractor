@@ -8,6 +8,7 @@ interface ProgressIndicatorProps {
   progress: number;
   stepLabel: string;
   resultUrl: string | null;
+  csvUrl: string | null;
   rowCount: number | null;
 }
 
@@ -16,6 +17,7 @@ export function ProgressIndicator({
   progress,
   stepLabel,
   resultUrl,
+  csvUrl,
   rowCount,
 }: ProgressIndicatorProps) {
   if (status === "idle") return null;
@@ -35,14 +37,23 @@ export function ProgressIndicator({
       <Progress value={progress} className="h-2" />
 
       {isDone && resultUrl && (
-        <div className="flex flex-col items-center gap-3 pt-2">
+        <div className="flex flex-col gap-2 pt-2">
           <a
             href={resultUrl}
             download="timesheet.xlsx"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 sm:w-auto"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700"
           >
-            Baixar planilha Excel
+            Baixar Timesheet (Excel)
           </a>
+          {csvUrl && (
+            <a
+              href={csvUrl}
+              download="pjecalc.csv"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-green-700"
+            >
+              Baixar PJeCalc (CSV)
+            </a>
+          )}
         </div>
       )}
     </div>

@@ -3,13 +3,14 @@ import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config import settings
 from models.timesheet import ExtractionResult
+from services.csv_builder import build_csv
 from services.excel_builder import build_excel
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
 from services.mistral_service import MistralExtractionError, extract_with_mistral
@@ -194,6 +195,36 @@ async def extract(request: Request, file: UploadFile = File(...)):
             "X-Provider-Used": provider,
             "X-Rows-Extracted": str(result.total_rows),
             "X-PDF-Type": result.pdf_type,
+        },
+    )
+
+
+@app.post("/extract/csv")
+@limiter.limit("10/minute")
+async def extract_csv(request: Request, file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    logger.info(
+        "POST /extract/csv — filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
+    _validate_pdf(pdf_bytes, len(pdf_bytes))
+
+    result, provider = await _run_pipeline(pdf_bytes)
+    csv_content = build_csv(result)
+
+    original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
+    download_name = f"pjecalc_{original_stem}.csv"
+
+    return Response(
+        content=csv_content.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"',
+            "X-Provider-Used": provider,
+            "X-Rows-Extracted": str(result.total_rows),
+            "X-PDF-Type": result.pdf_type,
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Provider-Used, X-Rows-Extracted, X-PDF-Type",
         },
     )
 
