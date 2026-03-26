@@ -9,6 +9,7 @@ interface ProgressIndicatorProps {
   stepLabel: string;
   resultUrl: string | null;
   csvUrl: string | null;
+  csvExt: string;
   rowCount: number | null;
 }
 
@@ -18,12 +19,18 @@ export function ProgressIndicator({
   stepLabel,
   resultUrl,
   csvUrl,
+  csvExt,
   rowCount,
 }: ProgressIndicatorProps) {
   if (status === "idle") return null;
 
   const isLoading = status === "uploading" || status === "processing";
   const isDone = status === "done";
+
+  const csvLabel =
+    csvExt === "zip"
+      ? "Baixar PJeCalc (ZIP — múltiplos motoristas)"
+      : "Baixar PJeCalc (CSV)";
 
   return (
     <div className="flex flex-col gap-3">
@@ -48,10 +55,10 @@ export function ProgressIndicator({
           {csvUrl && (
             <a
               href={csvUrl}
-              download="pjecalc.csv"
+              download={`pjecalc.${csvExt}`}
               className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-green-700"
             >
-              Baixar PJeCalc (CSV)
+              {csvLabel}
             </a>
           )}
         </div>

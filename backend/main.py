@@ -10,8 +10,9 @@ from slowapi.util import get_remote_address
 
 from config import settings
 from models.timesheet import ExtractionResult
-from services.csv_builder import build_csv
-from services.excel_builder import build_excel
+from services.csv_builder import build_csv, build_guia_csv
+from services.excel_builder import build_excel, build_guia_excel
+from services.guia_ministerial_service import GuiaExtractionError, extract_with_guia_ministerial
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
 from services.mistral_service import MistralExtractionError, extract_with_mistral
 from services.pdf_detector import detect_pdf_type
@@ -225,6 +226,85 @@ async def extract_csv(request: Request, file: UploadFile = File(...)):
             "X-Rows-Extracted": str(result.total_rows),
             "X-PDF-Type": result.pdf_type,
             "Access-Control-Expose-Headers": "Content-Disposition, X-Provider-Used, X-Rows-Extracted, X-PDF-Type",
+        },
+    )
+
+
+@app.post("/extract/guia")
+@limiter.limit("10/minute")
+async def extract_guia(request: Request, file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    logger.info(
+        "POST /extract/guia — filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
+    _validate_pdf(pdf_bytes, len(pdf_bytes))
+
+    try:
+        rows = await extract_with_guia_ministerial(pdf_bytes)
+    except GuiaExtractionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not rows:
+        raise HTTPException(
+            status_code=422,
+            detail="Nenhum registro encontrado nas guias ministeriais.",
+        )
+
+    excel_bytes = build_guia_excel(rows)
+    original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
+    download_name = f"guia_{original_stem}.xlsx"
+    n_workers = len({r.worker_name for r in rows})
+
+    return StreamingResponse(
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"',
+            "X-Provider-Used": "gemini-guia",
+            "X-Rows-Extracted": str(len(rows)),
+            "X-Workers-Found": str(n_workers),
+        },
+    )
+
+
+@app.post("/extract/guia/csv")
+@limiter.limit("10/minute")
+async def extract_guia_csv(request: Request, file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    logger.info(
+        "POST /extract/guia/csv — filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
+    _validate_pdf(pdf_bytes, len(pdf_bytes))
+
+    try:
+        rows = await extract_with_guia_ministerial(pdf_bytes)
+    except GuiaExtractionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not rows:
+        raise HTTPException(
+            status_code=422,
+            detail="Nenhum registro encontrado nas guias ministeriais.",
+        )
+
+    content_bytes, content_type = build_guia_csv(rows)
+    original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
+    n_workers = len({r.worker_name for r in rows})
+    ext = "zip" if content_type == "application/zip" else "csv"
+    download_name = f"pjecalc_{original_stem}.{ext}"
+
+    return Response(
+        content=content_bytes,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"',
+            "X-Provider-Used": "gemini-guia",
+            "X-Rows-Extracted": str(len(rows)),
+            "X-Workers-Found": str(n_workers),
         },
     )
 

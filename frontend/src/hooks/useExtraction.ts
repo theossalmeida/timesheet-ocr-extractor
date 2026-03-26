@@ -1,8 +1,14 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { extractTimesheet, extractTimesheetCSV, ApiError } from "@/lib/api";
-import type { ExtractionHook, ExtractionState } from "@/lib/types";
+import {
+  extractTimesheet,
+  extractTimesheetCSV,
+  extractGuia,
+  extractGuiaCSV,
+  ApiError,
+} from "@/lib/api";
+import type { ExtractionHook, ExtractionMode, ExtractionState } from "@/lib/types";
 
 const IDLE_STATE: ExtractionState = {
   status: "idle",
@@ -10,6 +16,7 @@ const IDLE_STATE: ExtractionState = {
   stepLabel: "",
   resultUrl: null,
   csvUrl: null,
+  csvExt: "csv",
   rowCount: null,
   provider: null,
   error: null,
@@ -25,19 +32,19 @@ export function useExtraction(): ExtractionHook {
   }, []);
 
   const upload = useCallback(
-    async (file: File) => {
+    async (file: File, mode: ExtractionMode) => {
       setState({
         status: "uploading",
         progress: 0,
         stepLabel: "Enviando arquivo...",
         resultUrl: null,
         csvUrl: null,
+        csvExt: "csv",
         rowCount: null,
         provider: null,
         error: null,
       });
 
-      // Simulated progress stages
       const stages: Array<[number, string, number]> = [
         [10, "Enviando arquivo...", 300],
         [20, "Arquivo recebido. Analisando PDF...", 500],
@@ -60,10 +67,27 @@ export function useExtraction(): ExtractionHook {
       setState((s) => ({ ...s, status: "processing" }));
 
       try {
-        const [excelResult, csvBlob] = await Promise.all([
-          extractTimesheet(file),
-          extractTimesheetCSV(file),
-        ]);
+        let excelResult: Awaited<ReturnType<typeof extractTimesheet>>;
+        let csvBlob: Blob;
+        let csvExt = "csv";
+
+        if (mode === "guia") {
+          const [guiaResult, guiaCsv] = await Promise.all([
+            extractGuia(file),
+            extractGuiaCSV(file),
+          ]);
+          excelResult = guiaResult;
+          csvBlob = guiaCsv.blob;
+          csvExt = guiaCsv.ext;
+        } else {
+          const [timesheetResult, timesheetCsv] = await Promise.all([
+            extractTimesheet(file),
+            extractTimesheetCSV(file),
+          ]);
+          excelResult = timesheetResult;
+          csvBlob = timesheetCsv;
+        }
+
         clearInterval(interval);
 
         setProgress(95, "Quase pronto...");
@@ -81,6 +105,7 @@ export function useExtraction(): ExtractionHook {
           stepLabel: `${excelResult.rowCount} registros foram extraídos!`,
           resultUrl: url,
           csvUrl,
+          csvExt,
           rowCount: excelResult.rowCount,
           provider: excelResult.provider,
           error: null,
@@ -97,6 +122,7 @@ export function useExtraction(): ExtractionHook {
           stepLabel: "",
           resultUrl: null,
           csvUrl: null,
+          csvExt: "csv",
           rowCount: null,
           provider: null,
           error: message,

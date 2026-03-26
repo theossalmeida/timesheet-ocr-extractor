@@ -1,12 +1,23 @@
 "use client";
 
+import { useState } from "react";
 import { useExtraction } from "@/hooks/useExtraction";
+import { ModeSelector } from "@/components/ModeSelector";
 import { UploadZone } from "@/components/UploadZone";
 import { ProgressIndicator } from "@/components/ProgressIndicator";
 import { ErrorMessage } from "@/components/ErrorMessage";
+import type { ExtractionMode } from "@/lib/types";
+
+const MODE_DESCRIPTIONS: Record<ExtractionMode, string> = {
+  cartao: "Faça upload do PDF de cartão de ponto e baixe a planilha Excel formatada.",
+  guia: "Faça upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
+};
 
 export default function Home() {
+  const [mode, setMode] = useState<ExtractionMode>("cartao");
   const extraction = useExtraction();
+
+  const isActive = extraction.status !== "idle" && extraction.status !== "error";
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-gray-50 p-4">
@@ -16,13 +27,25 @@ export default function Home() {
             Extrator de Ponto
           </h1>
           <p className="mt-2 text-sm text-gray-500">
-            Faça upload do PDF de registro de ponto e baixe a planilha Excel formatada.
+            {MODE_DESCRIPTIONS[mode]}
           </p>
         </div>
 
         <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-gray-200 flex flex-col gap-4">
+          <ModeSelector
+            mode={mode}
+            onChange={(m) => {
+              setMode(m);
+              if (extraction.status !== "idle") extraction.reset();
+            }}
+            disabled={isActive}
+          />
+
           {extraction.status !== "done" && (
-            <UploadZone onFile={extraction.upload} status={extraction.status} />
+            <UploadZone
+              onFile={(file) => extraction.upload(file, mode)}
+              status={extraction.status}
+            />
           )}
 
           {extraction.status !== "idle" && extraction.status !== "error" && (
@@ -32,6 +55,7 @@ export default function Home() {
               stepLabel={extraction.stepLabel}
               resultUrl={extraction.resultUrl}
               csvUrl={extraction.csvUrl}
+              csvExt={extraction.csvExt}
               rowCount={extraction.rowCount}
             />
           )}

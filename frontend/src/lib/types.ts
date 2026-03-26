@@ -29,6 +29,8 @@ export interface ExtractionResult {
   total_rows: number;
 }
 
+export type ExtractionMode = "cartao" | "guia";
+
 export type ExtractionStatus =
   | "idle"
   | "uploading"
@@ -42,12 +44,13 @@ export interface ExtractionState {
   stepLabel: string;
   resultUrl: string | null;
   csvUrl: string | null;
+  csvExt: string;
   rowCount: number | null;
   provider: string | null;
   error: string | null;
 }
 
 export interface ExtractionHook extends ExtractionState {
-  upload: (file: File) => Promise<void>;
+  upload: (file: File, mode: ExtractionMode) => Promise<void>;
   reset: () => void;
 }

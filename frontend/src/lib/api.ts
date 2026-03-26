@@ -58,6 +58,90 @@ export async function extractTimesheet(file: File): Promise<ExtractResult> {
   return { blob, provider, rowCount };
 }
 
+export async function extractGuia(file: File): Promise<ExtractResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 300_000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/extract/guia`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("A requisição excedeu o tempo limite (300s).", 408);
+    }
+    throw new ApiError("Não foi possível conectar ao servidor.", 0);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    let message = "Erro ao processar as guias ministeriais.";
+    try {
+      const body = await response.json();
+      if (body?.error) message = body.error;
+      else if (body?.detail) message = body.detail;
+    } catch {
+      // ignore JSON parse errors
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const blob = await response.blob();
+  const provider = response.headers.get("x-provider-used") ?? "gemini-guia";
+  const rowCount = parseInt(response.headers.get("x-rows-extracted") ?? "0", 10);
+
+  return { blob, provider, rowCount };
+}
+
+export async function extractGuiaCSV(file: File): Promise<{ blob: Blob; ext: string }> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 300_000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/extract/guia/csv`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("A requisição excedeu o tempo limite (300s).", 408);
+    }
+    throw new ApiError("Não foi possível conectar ao servidor.", 0);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    let message = "Erro ao gerar CSV das guias ministeriais.";
+    try {
+      const body = await response.json();
+      if (body?.error) message = body.error;
+      else if (body?.detail) message = body.detail;
+    } catch {
+      // ignore JSON parse errors
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const ext = contentType.includes("zip") ? "zip" : "csv";
+  const blob = await response.blob();
+
+  return { blob, ext };
+}
+
 export async function extractTimesheetCSV(file: File): Promise<Blob> {
   const form = new FormData();
   form.append("file", file);

@@ -66,6 +66,50 @@ def _row_fill(row: TimesheetRow, row_idx: int) -> PatternFill:
     return _ALT_FILL if row_idx % 2 == 0 else _WHITE_FILL
 
 
+def build_guia_excel(rows: list[TimesheetRow]) -> bytes:
+    """Build a multi-tab Excel workbook for Guia Ministerial — one sheet per worker."""
+    from collections import defaultdict
+
+    workers: dict[str, list[TimesheetRow]] = defaultdict(list)
+    for row in rows:
+        key = row.worker_name or "DESCONHECIDO"
+        workers[key].append(row)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)  # remove default blank sheet
+
+    guia_headers = ["Data", "Entrada 1", "Saída 1"]
+    guia_widths = [12, 10, 10]
+
+    for worker_name, worker_rows in workers.items():
+        sheet_title = worker_name[:31]  # Excel tab limit
+        ws = wb.create_sheet(sheet_title)
+
+        # Header
+        for col, (header, width) in enumerate(zip(guia_headers, guia_widths), start=1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = _HEADER_FONT
+            cell.fill = _HEADER_FILL
+            cell.border = _BORDER
+            cell.alignment = _CENTER
+            ws.column_dimensions[cell.column_letter].width = width
+
+        for i, row in enumerate(worker_rows, start=1):
+            excel_row = i + 1
+            fill = _ALT_FILL if i % 2 == 0 else _WHITE_FILL
+            values = [row.data, row.entrada_1, row.saida_1]
+            alignments = [_LEFT, _CENTER, _CENTER]
+            for col, (val, align) in enumerate(zip(values, alignments), start=1):
+                cell = ws.cell(row=excel_row, column=col, value=val)
+                cell.fill = fill
+                cell.border = _BORDER
+                cell.alignment = align
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def build_excel(result: ExtractionResult) -> bytes:
     wb = openpyxl.Workbook()
 
