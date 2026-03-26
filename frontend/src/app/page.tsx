@@ -32,7 +32,6 @@ export default function Home() {
               stepLabel={extraction.stepLabel}
               resultUrl={extraction.resultUrl}
               rowCount={extraction.rowCount}
-              provider={extraction.provider}
             />
           )}
 

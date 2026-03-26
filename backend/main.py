@@ -149,11 +149,14 @@ async def extract(request: Request, file: UploadFile = File(...)):
     result, provider = await _run_pipeline(pdf_bytes)
     excel_bytes = build_excel(result)
 
+    original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
+    download_name = f"timesheet_{original_stem}.xlsx"
+
     return StreamingResponse(
         io.BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            "Content-Disposition": 'attachment; filename="timesheet.xlsx"',
+            "Content-Disposition": f'attachment; filename="{download_name}"',
             "X-Provider-Used": provider,
             "X-Rows-Extracted": str(result.total_rows),
             "X-PDF-Type": result.pdf_type,
