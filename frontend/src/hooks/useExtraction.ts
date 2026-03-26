@@ -69,7 +69,7 @@ export function useExtraction(): ExtractionHook {
         setState({
           status: "done",
           progress: 100,
-          stepLabel: `${rowCount} registros extraídos via ${provider}`,
+          stepLabel: `${rowCount} registros foram extraídos!`,
           resultUrl: url,
           rowCount,
           provider,

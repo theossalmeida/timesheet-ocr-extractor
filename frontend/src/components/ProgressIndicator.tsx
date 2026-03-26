@@ -36,9 +36,6 @@ export function ProgressIndicator({
 
       {isDone && resultUrl && (
         <div className="flex flex-col items-center gap-3 pt-2">
-          <p className="text-sm text-gray-500">
-            Encontrei <span className="font-medium text-gray-700">{rowCount}</span> registros!
-          </p>
           <a
             href={resultUrl}
             download="timesheet.xlsx"
