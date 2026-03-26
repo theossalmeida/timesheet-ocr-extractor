@@ -33,6 +33,7 @@ app.add_middleware(
     allow_origins=settings.CORS_ORIGINS,
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
+    expose_headers=["X-Provider-Used", "X-Rows-Extracted", "X-PDF-Type"],
 )
 
 app.state.limiter = limiter
