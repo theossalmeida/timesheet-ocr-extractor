@@ -7,6 +7,7 @@ from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
     _normalize_worker,
+    _parse_chat_response,
     _split_pdf_chunks,
     extract_with_guia_ministerial,
 )
@@ -170,15 +171,40 @@ def test_aggregate_worker_name_from_id():
     assert rows[0].worker_name == "MOTORISTA 99999"
 
 
+# ── _parse_chat_response ──────────────────────────────────────────────────────
+
+def test_parse_chat_response_records_key():
+    payload = {"choices": [{"message": {"content": '{"records": [{"worker_name": "X", "worker_id": null, "data": "01/03/2024", "primeira_entrada": "08:00", "ultima_saida": "17:00"}]}'}}]}
+    result = _parse_chat_response(payload)
+    assert len(result) == 1
+    assert result[0]["worker_name"] == "X"
+
+
+def test_parse_chat_response_top_level_array():
+    payload = {"choices": [{"message": {"content": '[{"worker_name": "Y", "worker_id": null, "data": "02/03/2024", "primeira_entrada": "09:00", "ultima_saida": "18:00"}]'}}]}
+    result = _parse_chat_response(payload)
+    assert len(result) == 1
+
+
+def test_parse_chat_response_invalid_json():
+    payload = {"choices": [{"message": {"content": "not json"}}]}
+    assert _parse_chat_response(payload) == []
+
+
+def test_parse_chat_response_markdown_fenced():
+    payload = {"choices": [{"message": {"content": '```json\n{"records": []}\n```'}}]}
+    assert _parse_chat_response(payload) == []
+
+
 # ── extract_with_guia_ministerial (mocked) ────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_extract_calls_gemini_per_chunk():
+async def test_extract_calls_process_chunk_per_chunk():
     pdf = _make_minimal_pdf(25)  # 3 chunks of 10+10+5
     mock_records = [{"worker_name": "TESTE", "worker_id": None, "data": "01/03/2024",
                      "primeira_entrada": "08:00", "ultima_saida": "17:00"}]
 
-    with patch("services.guia_ministerial_service._call_gemini_chunk",
+    with patch("services.guia_ministerial_service._process_chunk",
                new=AsyncMock(return_value=mock_records)) as mock_call:
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 
@@ -199,7 +225,7 @@ async def test_extract_merges_chunks():
           "primeira_entrada": "06:00", "ultima_saida": "14:00"}],
     ]
 
-    with patch("services.guia_ministerial_service._call_gemini_chunk",
+    with patch("services.guia_ministerial_service._process_chunk",
                new=AsyncMock(side_effect=chunk_results)):
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 

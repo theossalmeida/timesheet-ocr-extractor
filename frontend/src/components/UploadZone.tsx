@@ -8,11 +8,15 @@ import type { ExtractionStatus } from "@/lib/types";
 interface UploadZoneProps {
   onFile: (file: File) => void;
   status: ExtractionStatus;
+  mode: string;
 }
 
-const MAX_SIZE = 50 * 1024 * 1024;
+const MAX_SIZE_CARTAO = 50 * 1024 * 1024;
+const MAX_SIZE_GUIA = 200 * 1024 * 1024;
 
-export function UploadZone({ onFile, status }: UploadZoneProps) {
+export function UploadZone({ onFile, status, mode }: UploadZoneProps) {
+  const maxSize = mode === "guia" ? MAX_SIZE_GUIA : MAX_SIZE_CARTAO;
+
   const disabled = status === "uploading" || status === "processing";
 
   const onDrop = useCallback(
@@ -26,7 +30,7 @@ export function UploadZone({ onFile, status }: UploadZoneProps) {
     useDropzone({
       onDrop,
       accept: { "application/pdf": [".pdf"] },
-      maxSize: MAX_SIZE,
+      maxSize,
       maxFiles: 1,
       disabled,
     });
@@ -65,7 +69,7 @@ export function UploadZone({ onFile, status }: UploadZoneProps) {
             Arraste o PDF aqui ou{" "}
             <span className="text-blue-600 underline">clique para selecionar</span>
           </p>
-          <p className="text-sm text-gray-400">Apenas PDF · máx. 50 MB</p>
+          <p className="text-sm text-gray-400">Apenas PDF · máx. {maxSize / 1024 / 1024} MB</p>
         </>
       )}
       {rejectionMessage && (

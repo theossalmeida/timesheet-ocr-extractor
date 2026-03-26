@@ -62,23 +62,14 @@ export async function extractGuia(file: File): Promise<ExtractResult> {
   const form = new FormData();
   form.append("file", file);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300_000);
-
   let response: Response;
   try {
     response = await fetch(`${API_URL}/extract/guia`, {
       method: "POST",
       body: form,
-      signal: controller.signal,
     });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new ApiError("A requisição excedeu o tempo limite (300s).", 408);
-    }
+  } catch {
     throw new ApiError("Não foi possível conectar ao servidor.", 0);
-  } finally {
-    clearTimeout(timeout);
   }
 
   if (!response.ok) {
@@ -104,23 +95,14 @@ export async function extractGuiaCSV(file: File): Promise<{ blob: Blob; ext: str
   const form = new FormData();
   form.append("file", file);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300_000);
-
   let response: Response;
   try {
     response = await fetch(`${API_URL}/extract/guia/csv`, {
       method: "POST",
       body: form,
-      signal: controller.signal,
     });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new ApiError("A requisição excedeu o tempo limite (300s).", 408);
-    }
+  } catch {
     throw new ApiError("Não foi possível conectar ao servidor.", 0);
-  } finally {
-    clearTimeout(timeout);
   }
 
   if (!response.ok) {

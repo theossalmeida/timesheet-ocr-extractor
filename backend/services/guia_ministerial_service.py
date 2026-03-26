@@ -1,5 +1,4 @@
 from __future__ import annotations
-import base64
 import io
 import json
 import logging
@@ -14,18 +13,17 @@ from config import settings
 from models.timesheet import TimesheetRow
 from utils.normalizers import normalize_date, normalize_time
 
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
-)
+MISTRAL_FILES_URL = "https://api.mistral.ai/v1/files"
+MISTRAL_OCR_URL = "https://api.mistral.ai/v1/ocr"
+MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
 
-CHUNK_SIZE = 20  # pages per Gemini request
+CHUNK_SIZE = 20  # pages per Mistral OCR upload (stays under 50 MB limit)
 
-GUIA_PROMPT = """You are extracting work time records from scanned Brazilian labor timesheet documents.
+GUIA_SYSTEM_PROMPT = """You are extracting work time records from OCR text of Brazilian labor timesheet documents.
 
-The document may be in any format: individual work tickets (Guia Ministerial, Papeleta de Serviço Externo), daily sheets, monthly timesheets, or any handwritten work record. The format, layout, and language of labels may vary.
+The text comes from scanned handwritten work tickets (Guia Ministerial, Papeleta de Serviço Externo) or any handwritten daily work record. Format and labels may vary widely.
 
-For EACH daily work record found in the document, extract:
+For EACH daily work record found, extract:
 - "worker_name": the worker's full name (string, or null if not identifiable)
 - "worker_id": the worker's ID, registration number, or code (string, or null if absent)
 - "data": the date in DD/MM/YYYY format
@@ -33,15 +31,20 @@ For EACH daily work record found in the document, extract:
 - "ultima_saida": the LAST clock-out/departure/end time of that day in HH:MM format
 
 Rules:
-- If a record has multiple time rows (e.g. multiple trips or shifts in one day), extract ONLY the first clock-in and LAST clock-out — ignore all intermediate times, breaks, and totals
-- Times may be written as HHMM (e.g. "1350" means "13:50"), HH:MM, H:MM, or similar — always output as HH:MM
+- If a record has multiple time rows (multiple trips or shifts in one day), extract ONLY the first clock-in and LAST clock-out — ignore all intermediate times
+- Times may be written as HHMM (e.g. "1350" means "13:50"), HH:MM, H:MM — always output as HH:MM
 - Dates may be DD/MM/YY or DD/MM/YYYY — always output DD/MM/YYYY (treat 2-digit years as 20XX)
-- If a time or date is illegible, use null
+- If a time or date is illegible or missing, use null
 - If multiple different workers appear, return one entry per worker per date
-- Return an empty array [] if no valid records are found
+- Return an empty records array if no valid records are found
 
-Return ONLY a JSON array, no explanation, no markdown. Example:
-[{"worker_name": "JOÃO SILVA", "worker_id": "12345", "data": "25/01/2024", "primeira_entrada": "06:30", "ultima_saida": "14:50"}]"""
+Return ONLY a valid JSON object with a "records" key. Example:
+{"records": [{"worker_name": "JOÃO SILVA", "worker_id": "12345", "data": "25/01/2024", "primeira_entrada": "06:30", "ultima_saida": "14:50"}]}"""
+
+GUIA_USER_TEMPLATE = (
+    "Extract all work time records from the following OCR text and return JSON.\n\n"
+    "--- OCR TEXT ---\n{text}\n--- END ---"
+)
 
 
 class GuiaExtractionError(Exception):
@@ -69,48 +72,20 @@ def _clean_json(text: str) -> str:
     return text.strip()
 
 
-def _parse_chunk_response(response_json: dict) -> list[dict]:
+def _parse_chat_response(response_json: dict) -> list[dict]:
     try:
-        text = response_json["candidates"][0]["content"]["parts"][0]["text"]
+        text = response_json["choices"][0]["message"]["content"]
         text = _clean_json(text)
         data = json.loads(text)
-        return data if isinstance(data, list) else []
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        logger.warning("guia: failed to parse Gemini chunk response: %s", e)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            records = data.get("records") or data.get("data") or []
+            return records if isinstance(records, list) else []
         return []
-
-
-async def _call_gemini_chunk(chunk_bytes: bytes) -> list[dict]:
-    encoded = base64.b64encode(chunk_bytes).decode("utf-8")
-    body = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
-                {"text": GUIA_PROMPT},
-            ]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.1,
-            "maxOutputTokens": 65536,
-        },
-    }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
-        response = await client.post(
-            GEMINI_URL,
-            params={"key": settings.GEMINI_API_KEY},
-            json=body,
-        )
-    if response.status_code != 200:
-        logger.error(
-            "guia: Gemini error — status=%d body=%s",
-            response.status_code,
-            response.text[:300],
-        )
-        raise GuiaExtractionError(
-            f"Gemini API error {response.status_code}: {response.text[:300]}"
-        )
-    return _parse_chunk_response(response.json())
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        logger.warning("guia: failed to parse chat response: %s", e)
+        return []
 
 
 def _normalize_worker(name: str | None, worker_id: str | None) -> str:
@@ -132,8 +107,7 @@ def _date_sort_key(date_str: str) -> tuple[int, int, int]:
 
 
 def _aggregate(records: list[dict]) -> list[TimesheetRow]:
-    """Group raw Gemini records by (worker, date). Keep earliest entrada, latest saída."""
-    # {worker_key: {date_str: {"entrada": str|None, "saida": str|None}}}
+    """Group raw records by (worker, date). Keep earliest entrada, latest saída."""
     grouped: dict[str, dict[str, dict[str, str | None]]] = {}
 
     for rec in records:
@@ -169,6 +143,95 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     return rows
 
 
+async def _ocr_chunk(chunk_bytes: bytes) -> list[str]:
+    """Upload one PDF chunk to Mistral OCR; return list of markdown strings per page."""
+    headers = {"Authorization": f"Bearer {settings.MISTRAL_API_KEY}"}
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=30.0, read=300.0, write=120.0, pool=10.0)
+    ) as client:
+        upload = await client.post(
+            MISTRAL_FILES_URL,
+            headers=headers,
+            files={"file": ("chunk.pdf", chunk_bytes, "application/pdf")},
+            data={"purpose": "ocr"},
+        )
+        if upload.status_code != 200:
+            raise GuiaExtractionError(
+                f"Mistral file upload failed {upload.status_code}: {upload.text[:300]}"
+            )
+        file_id = upload.json()["id"]
+
+        ocr = await client.post(
+            MISTRAL_OCR_URL,
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "model": "mistral-ocr-latest",
+                "document": {"type": "file", "file_id": file_id},
+                "include_image_base64": False,
+            },
+        )
+
+        # Best-effort cleanup
+        try:
+            await client.delete(f"{MISTRAL_FILES_URL}/{file_id}", headers=headers)
+        except Exception:
+            pass
+
+        if ocr.status_code != 200:
+            raise GuiaExtractionError(
+                f"Mistral OCR failed {ocr.status_code}: {ocr.text[:300]}"
+            )
+
+    pages = ocr.json().get("pages", [])
+    return [p.get("markdown", "") for p in pages]
+
+
+async def _extract_from_markdown(pages: list[str]) -> list[dict]:
+    """Call Mistral small chat to extract structured records from OCR markdown."""
+    text = "\n\n---PAGE BREAK---\n\n".join(p for p in pages if p.strip())
+    if not text:
+        return []
+
+    body = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {"role": "system", "content": GUIA_SYSTEM_PROMPT},
+            {"role": "user", "content": GUIA_USER_TEMPLATE.format(text=text)},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 8192,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {settings.MISTRAL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        response = await client.post(MISTRAL_CHAT_URL, headers=headers, json=body)
+
+    if response.status_code != 200:
+        logger.error(
+            "guia: Mistral chat error — status=%d body=%s",
+            response.status_code,
+            response.text[:300],
+        )
+        raise GuiaExtractionError(
+            f"Mistral chat error {response.status_code}: {response.text[:300]}"
+        )
+
+    return _parse_chat_response(response.json())
+
+
+async def _process_chunk(chunk_bytes: bytes) -> list[dict]:
+    """OCR one PDF chunk then extract records — the testable unit."""
+    pages = await _ocr_chunk(chunk_bytes)
+    logger.info("guia: OCR returned %d pages for chunk", len(pages))
+    return await _extract_from_markdown(pages)
+
+
 async def extract_with_guia_ministerial(
     pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE
 ) -> list[TimesheetRow]:
@@ -178,14 +241,15 @@ async def extract_with_guia_ministerial(
 
     all_records: list[dict] = []
     for i, chunk in enumerate(chunks):
-        logger.info(
-            "guia: processing chunk %d/%d — chunk_size=%d bytes",
-            i + 1, len(chunks), len(chunk),
-        )
-        records = await _call_gemini_chunk(chunk)
+        logger.info("guia: processing chunk %d/%d — %d bytes", i + 1, len(chunks), len(chunk))
+        records = await _process_chunk(chunk)
         logger.info("guia: chunk %d → %d records", i + 1, len(records))
         all_records.extend(records)
 
     rows = _aggregate(all_records)
-    logger.info("guia: done — total_rows=%d unique workers=%d", len(rows), len({r.worker_name for r in rows}))
+    logger.info(
+        "guia: done — total_rows=%d unique workers=%d",
+        len(rows),
+        len({r.worker_name for r in rows}),
+    )
     return rows

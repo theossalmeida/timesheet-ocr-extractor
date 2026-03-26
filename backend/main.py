@@ -59,12 +59,12 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 
-def _validate_pdf(file_bytes: bytes, size_bytes: int) -> None:
-    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
-    if size_bytes > max_bytes:
+def _validate_pdf(file_bytes: bytes, size_bytes: int, max_mb: int | None = None) -> None:
+    limit = (max_mb or settings.MAX_FILE_SIZE_MB) * 1024 * 1024
+    if size_bytes > limit:
         raise HTTPException(
             status_code=413,
-            detail=f"Arquivo muito grande. Máximo permitido: {settings.MAX_FILE_SIZE_MB}MB.",
+            detail=f"Arquivo muito grande. Máximo permitido: {max_mb or settings.MAX_FILE_SIZE_MB}MB.",
         )
     if not file_bytes[:4] == b"%PDF":
         raise HTTPException(
@@ -239,7 +239,7 @@ async def extract_guia(request: Request, file: UploadFile = File(...)):
         file.filename or "unknown",
         len(pdf_bytes),
     )
-    _validate_pdf(pdf_bytes, len(pdf_bytes))
+    _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
 
     try:
         rows = await extract_with_guia_ministerial(pdf_bytes)
@@ -278,7 +278,7 @@ async def extract_guia_csv(request: Request, file: UploadFile = File(...)):
         file.filename or "unknown",
         len(pdf_bytes),
     )
-    _validate_pdf(pdf_bytes, len(pdf_bytes))
+    _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
 
     try:
         rows = await extract_with_guia_ministerial(pdf_bytes)
