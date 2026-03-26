@@ -46,7 +46,7 @@ def test_extract_file_too_large():
     assert r.status_code == 413
 
 
-def test_extract_success_returns_xlsx():
+def test_extract_success_returns_bundle():
     with patch("main.detect_pdf_type", return_value="native"), \
          patch("main.extract_with_pdfplumber", return_value=SAMPLE_ROWS), \
          patch("main.build_excel", return_value=b"PKfake_excel_bytes"):
@@ -54,9 +54,12 @@ def test_extract_success_returns_xlsx():
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith(
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    body = r.json()
+    assert "excel_b64" in body
+    assert "csv_b64" in body
+    assert body["rows_extracted"] == 2
+    assert body["provider"] == "pdfplumber"
+    assert body["pdf_type"] == "native"
     assert r.headers["x-provider-used"] == "pdfplumber"
     assert r.headers["x-rows-extracted"] == "2"
     assert r.headers["x-pdf-type"] == "native"

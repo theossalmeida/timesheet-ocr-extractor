@@ -1,9 +1,10 @@
+import base64
 import io
 import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -184,48 +185,25 @@ async def extract(request: Request, file: UploadFile = File(...)):
 
     result, provider = await _run_pipeline(pdf_bytes)
     excel_bytes = build_excel(result)
-
-    original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
-    download_name = f"timesheet_{original_stem}.xlsx"
-
-    return StreamingResponse(
-        io.BytesIO(excel_bytes),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f'attachment; filename="{download_name}"',
-            "X-Provider-Used": provider,
-            "X-Rows-Extracted": str(result.total_rows),
-            "X-PDF-Type": result.pdf_type,
-        },
-    )
-
-
-@app.post("/extract/csv")
-@limiter.limit("10/minute")
-async def extract_csv(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
-    logger.info(
-        "POST /extract/csv — filename=%s size=%d bytes",
-        file.filename or "unknown",
-        len(pdf_bytes),
-    )
-    _validate_pdf(pdf_bytes, len(pdf_bytes))
-
-    result, provider = await _run_pipeline(pdf_bytes)
     csv_content = build_csv(result)
 
     original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
-    download_name = f"pjecalc_{original_stem}.csv"
 
-    return Response(
-        content=csv_content.encode("utf-8-sig"),
-        media_type="text/csv; charset=utf-8",
+    return JSONResponse(
+        content={
+            "excel_b64": base64.b64encode(excel_bytes).decode(),
+            "excel_filename": f"timesheet_{original_stem}.xlsx",
+            "csv_b64": base64.b64encode(csv_content.encode("utf-8-sig")).decode(),
+            "csv_filename": f"pjecalc_{original_stem}.csv",
+            "csv_mime": "text/csv",
+            "rows_extracted": result.total_rows,
+            "provider": provider,
+            "pdf_type": result.pdf_type,
+        },
         headers={
-            "Content-Disposition": f'attachment; filename="{download_name}"',
             "X-Provider-Used": provider,
             "X-Rows-Extracted": str(result.total_rows),
             "X-PDF-Type": result.pdf_type,
-            "Access-Control-Expose-Headers": "Content-Disposition, X-Provider-Used, X-Rows-Extracted, X-PDF-Type",
         },
     )
 
@@ -253,55 +231,24 @@ async def extract_guia(request: Request, file: UploadFile = File(...)):
         )
 
     excel_bytes = build_guia_excel(rows)
+    csv_bytes, csv_mime = build_guia_csv(rows)
+
     original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
-    download_name = f"guia_{original_stem}.xlsx"
+    csv_ext = "zip" if csv_mime == "application/zip" else "csv"
     n_workers = len({r.worker_name for r in rows})
 
-    return StreamingResponse(
-        io.BytesIO(excel_bytes),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f'attachment; filename="{download_name}"',
-            "X-Provider-Used": "gemini-guia",
-            "X-Rows-Extracted": str(len(rows)),
-            "X-Workers-Found": str(n_workers),
+    return JSONResponse(
+        content={
+            "excel_b64": base64.b64encode(excel_bytes).decode(),
+            "excel_filename": f"guia_{original_stem}.xlsx",
+            "csv_b64": base64.b64encode(csv_bytes).decode(),
+            "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
+            "csv_mime": csv_mime,
+            "rows_extracted": len(rows),
+            "provider": "gemini-guia",
+            "pdf_type": "scanned",
         },
-    )
-
-
-@app.post("/extract/guia/csv")
-@limiter.limit("10/minute")
-async def extract_guia_csv(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
-    logger.info(
-        "POST /extract/guia/csv — filename=%s size=%d bytes",
-        file.filename or "unknown",
-        len(pdf_bytes),
-    )
-    _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
-
-    try:
-        rows = await extract_with_guia_ministerial(pdf_bytes)
-    except GuiaExtractionError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    if not rows:
-        raise HTTPException(
-            status_code=422,
-            detail="Nenhum registro encontrado nas guias ministeriais.",
-        )
-
-    content_bytes, content_type = build_guia_csv(rows)
-    original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
-    n_workers = len({r.worker_name for r in rows})
-    ext = "zip" if content_type == "application/zip" else "csv"
-    download_name = f"pjecalc_{original_stem}.{ext}"
-
-    return Response(
-        content=content_bytes,
-        media_type=content_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{download_name}"',
             "X-Provider-Used": "gemini-guia",
             "X-Rows-Extracted": str(len(rows)),
             "X-Workers-Found": str(n_workers),

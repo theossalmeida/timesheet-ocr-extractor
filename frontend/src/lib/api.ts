@@ -8,15 +8,35 @@ export class ApiError extends Error {
   }
 }
 
-export interface ExtractResult {
-  blob: Blob;
-  provider: string;
+export interface BundleResult {
+  excelBlob: Blob;
+  excelFilename: string;
+  csvBlob: Blob;
+  csvFilename: string;
+  csvExt: string;
   rowCount: number;
+  provider: string;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export async function extractTimesheet(file: File): Promise<ExtractResult> {
+function b64ToBlob(b64: string, mimeType: string): Blob {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: mimeType });
+}
+
+async function _parseError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json();
+    if (body?.error) return body.error;
+    if (body?.detail) return body.detail;
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+export async function extractTimesheet(file: File): Promise<BundleResult> {
   const form = new FormData();
   form.append("file", file);
 
@@ -40,25 +60,22 @@ export async function extractTimesheet(file: File): Promise<ExtractResult> {
   }
 
   if (!response.ok) {
-    let message = "Erro ao processar o PDF.";
-    try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-      else if (body?.detail) message = body.detail;
-    } catch {
-      // ignore JSON parse errors
-    }
-    throw new ApiError(message, response.status);
+    throw new ApiError(await _parseError(response, "Erro ao processar o PDF."), response.status);
   }
 
-  const blob = await response.blob();
-  const provider = response.headers.get("x-provider-used") ?? "desconhecido";
-  const rowCount = parseInt(response.headers.get("x-rows-extracted") ?? "0", 10);
-
-  return { blob, provider, rowCount };
+  const data = await response.json();
+  return {
+    excelBlob: b64ToBlob(data.excel_b64, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    excelFilename: data.excel_filename,
+    csvBlob: b64ToBlob(data.csv_b64, data.csv_mime),
+    csvFilename: data.csv_filename,
+    csvExt: data.csv_mime?.includes("zip") ? "zip" : "csv",
+    rowCount: data.rows_extracted ?? 0,
+    provider: data.provider ?? "desconhecido",
+  };
 }
 
-export async function extractGuia(file: File): Promise<ExtractResult> {
+export async function extractGuia(file: File): Promise<BundleResult> {
   const form = new FormData();
   form.append("file", file);
 
@@ -67,97 +84,27 @@ export async function extractGuia(file: File): Promise<ExtractResult> {
     response = await fetch(`${API_URL}/extract/guia`, {
       method: "POST",
       body: form,
+      // No timeout — guia processing can take several minutes
     });
   } catch {
     throw new ApiError("Não foi possível conectar ao servidor.", 0);
   }
 
   if (!response.ok) {
-    let message = "Erro ao processar as guias ministeriais.";
-    try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-      else if (body?.detail) message = body.detail;
-    } catch {
-      // ignore JSON parse errors
-    }
-    throw new ApiError(message, response.status);
+    throw new ApiError(
+      await _parseError(response, "Erro ao processar as guias ministeriais."),
+      response.status,
+    );
   }
 
-  const blob = await response.blob();
-  const provider = response.headers.get("x-provider-used") ?? "gemini-guia";
-  const rowCount = parseInt(response.headers.get("x-rows-extracted") ?? "0", 10);
-
-  return { blob, provider, rowCount };
-}
-
-export async function extractGuiaCSV(file: File): Promise<{ blob: Blob; ext: string }> {
-  const form = new FormData();
-  form.append("file", file);
-
-  let response: Response;
-  try {
-    response = await fetch(`${API_URL}/extract/guia/csv`, {
-      method: "POST",
-      body: form,
-    });
-  } catch {
-    throw new ApiError("Não foi possível conectar ao servidor.", 0);
-  }
-
-  if (!response.ok) {
-    let message = "Erro ao gerar CSV das guias ministeriais.";
-    try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-      else if (body?.detail) message = body.detail;
-    } catch {
-      // ignore JSON parse errors
-    }
-    throw new ApiError(message, response.status);
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  const ext = contentType.includes("zip") ? "zip" : "csv";
-  const blob = await response.blob();
-
-  return { blob, ext };
-}
-
-export async function extractTimesheetCSV(file: File): Promise<Blob> {
-  const form = new FormData();
-  form.append("file", file);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 150_000);
-
-  let response: Response;
-  try {
-    response = await fetch(`${API_URL}/extract/csv`, {
-      method: "POST",
-      body: form,
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new ApiError("A requisição excedeu o tempo limite (150s).", 408);
-    }
-    throw new ApiError("Não foi possível conectar ao servidor.", 0);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!response.ok) {
-    let message = "Erro ao processar o PDF.";
-    try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-      else if (body?.detail) message = body.detail;
-    } catch {
-      // ignore JSON parse errors
-    }
-    throw new ApiError(message, response.status);
-  }
-
-  return response.blob();
+  const data = await response.json();
+  return {
+    excelBlob: b64ToBlob(data.excel_b64, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    excelFilename: data.excel_filename,
+    csvBlob: b64ToBlob(data.csv_b64, data.csv_mime),
+    csvFilename: data.csv_filename,
+    csvExt: data.csv_mime?.includes("zip") ? "zip" : "csv",
+    rowCount: data.rows_extracted ?? 0,
+    provider: data.provider ?? "gemini-guia",
+  };
 }
