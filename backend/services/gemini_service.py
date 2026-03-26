@@ -21,11 +21,12 @@ EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor do
 Extract ALL timesheet rows from the provided document.
 Return a JSON array where each element has these fields (all optional, use null if absent):
 - "data": date in DD/MM/YYYY format
-- "entrada_1": first entry time in HH:MM format
-- "saida_1": first exit time in HH:MM format
-- "entrada_2": second entry time in HH:MM format (after lunch break)
-- "saida_2": second exit time in HH:MM format
+- "entrada_1": first entry time in HH:MM format — ONLY from columns explicitly labelled "Entrada" or equivalent
+- "saida_1": first exit time in HH:MM format — ONLY from columns explicitly labelled "Saída" or equivalent
+- "entrada_2": second entry time in HH:MM format (after lunch break) — ONLY if a second "Entrada" column exists
+- "saida_2": second exit time in HH:MM format — ONLY if a second "Saída" column exists
 - "ocorrencia_raw": occurrence/absence code exactly as written (e.g. "FERIAS", "FALTA", "DSR")
+IMPORTANT: columns labelled "Acréscimos", "Extras", "Adicional", "Intervalo", or similar are NOT entrada/saída — ignore them entirely.
 Include rows with absences or occurrences even if no times are present.
 Return ONLY the JSON array, no explanation, no markdown."""
 

@@ -93,6 +93,24 @@ def test_normalizes_date_format():
     assert result[0].data == "01/03/2024"
 
 
+def test_ignores_acrescimos_column():
+    """Columns labelled 'Acréscimos' must not be mapped to entrada/saída slots."""
+    table = [
+        ["Data", "Entrada", "Saída", "Acréscimos"],
+        ["01/03/2024", "08:00", "17:00", "00:30"],
+        ["02/03/2024", "08:00", "17:00", "00:00"],
+    ]
+    pdf = _mock_pdf_with_table(table)
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_with_pdfplumber(b"fake")
+    assert result is not None
+    assert len(result) == 2
+    assert result[0].entrada_1 == "08:00"
+    assert result[0].saida_1 == "17:00"
+    assert result[0].entrada_2 is None
+    assert result[0].saida_2 is None
+
+
 def test_fixture_native_pdf():
     path = os.path.join(FIXTURES_DIR, "native_table.pdf")
     if not os.path.exists(path):

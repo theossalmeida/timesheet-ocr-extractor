@@ -4,6 +4,7 @@ import logging
 import re
 
 import pdfplumber
+import pypdf
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,92 @@ def _parse_multirow_cell(cell_text: str) -> list[TimesheetRow]:
     return rows
 
 
+# Column header patterns — used to identify roles by name before falling back to position
+_HDR_DATE_RE = re.compile(r"\b(data|date|dia)\b", re.IGNORECASE)
+_HDR_ENTRY_RE = re.compile(r"\bentrada\b|\bentrada\s*\d|\bin\b|\bchegada\b", re.IGNORECASE)
+_HDR_EXIT_RE = re.compile(r"\bsa[íi]da\b|\bsa[íi]da\s*\d|\bout\b|\bpartida\b", re.IGNORECASE)
+_HDR_OCC_RE = re.compile(r"\bocorr[êe]ncia|\bfalta|\bobs|\bsit|\bjustif|\bcodigo\b|\bcód", re.IGNORECASE)
+# Time columns that are NOT entrada/saída (should be excluded from entry/exit detection)
+_HDR_SKIP_TIME_RE = re.compile(
+    r"\bacr[eé]scimo|\bextra|\badicional|\bintervalo|\balmo[cç]o|\bdescanso|\bhoras?\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_columns_by_header(table: list[list[str | None]]) -> dict[str, int | None] | None:
+    """Try to map column roles from header row text.
+
+    Returns a mapping if a header row with recognisable labels is found,
+    otherwise returns None so the caller can fall back to pattern detection.
+    """
+    for row in table[:3]:
+        if not row:
+            continue
+        cells = [str(c).strip() if c else "" for c in row]
+        # A header row has mostly text cells (not dates or pure time values)
+        text_cells = sum(
+            1 for c in cells if c and not _DATE_RE.search(c) and not _TIME_RE.search(c)
+        )
+        if text_cells < 2:
+            continue
+
+        date_col: int | None = None
+        entry_cols: list[int] = []
+        exit_cols: list[int] = []
+        occ_col: int | None = None
+
+        for i, cell in enumerate(cells):
+            if not cell:
+                continue
+            if _HDR_DATE_RE.search(cell):
+                date_col = i
+            elif _HDR_ENTRY_RE.search(cell):
+                entry_cols.append(i)
+            elif _HDR_EXIT_RE.search(cell):
+                exit_cols.append(i)
+            elif _HDR_OCC_RE.search(cell) and occ_col is None:
+                occ_col = i
+            # Columns matching _HDR_SKIP_TIME_RE are intentionally ignored
+
+        if date_col is not None and (entry_cols or exit_cols):
+            return {
+                "date": date_col,
+                "entry1": entry_cols[0] if len(entry_cols) > 0 else None,
+                "exit1": exit_cols[0] if len(exit_cols) > 0 else None,
+                "entry2": entry_cols[1] if len(entry_cols) > 1 else None,
+                "exit2": exit_cols[1] if len(exit_cols) > 1 else None,
+                "occ": occ_col,
+            }
+    return None
+
+
 def _detect_columns(header_rows: list[list[str | None]]) -> dict[str, int | None]:
-    """Scan up to 3 rows to detect column roles by content patterns."""
+    """Scan up to 3 rows to detect column roles.
+
+    Tries header-name matching first; falls back to content-pattern detection
+    so that non-entrada/saída time columns (e.g. acréscimos) are not mistakenly
+    mapped to entry/exit slots.
+    """
+    by_header = _detect_columns_by_header(header_rows)
+    if by_header is not None:
+        return by_header
+
+    # Fallback: positional detection from data patterns.
+    # Build a set of columns explicitly labelled as non-entry/exit time columns
+    # to exclude them even in the fallback path.
+    skip_cols: set[int] = set()
+    for row in header_rows[:3]:
+        if not row:
+            continue
+        cells = [str(c).strip() if c else "" for c in row]
+        text_cells = sum(
+            1 for c in cells if c and not _DATE_RE.search(c) and not _TIME_RE.search(c)
+        )
+        if text_cells >= 2:
+            for i, cell in enumerate(cells):
+                if cell and _HDR_SKIP_TIME_RE.search(cell):
+                    skip_cols.add(i)
+
     date_col: int | None = None
     time_cols: list[int] = []
     occ_col: int | None = None
@@ -119,7 +204,7 @@ def _detect_columns(header_rows: list[list[str | None]]) -> dict[str, int | None
             cell = str(cell).strip()
             if date_col is None and _DATE_RE.search(cell):
                 date_col = i
-            elif _TIME_RE.search(cell) and not _DATE_RE.search(cell):
+            elif _TIME_RE.search(cell) and not _DATE_RE.search(cell) and i not in skip_cols:
                 if i not in time_cols:
                     time_cols.append(i)
             elif cell and not _DATE_RE.search(cell) and not _TIME_RE.search(cell):
@@ -214,3 +299,61 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
     finally:
         if pdf is not None:
             pdf.close()
+
+
+def get_scanned_page_bytes(pdf_bytes: bytes) -> bytes | None:
+    """Return a sub-PDF containing pages whose timesheet content is in images.
+
+    A page is considered "scanned" when it has at least one embedded image
+    AND none of the three pdfplumber extraction strategies find any timesheet
+    rows in its text/tables.  Returns None when no such pages are found.
+    """
+    scanned_indices: list[int] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for i, page in enumerate(pdf.pages):
+            if not page.images:
+                continue  # no images → cannot be a scanned page
+
+            text = page.extract_text() or ""
+
+            # Strategy 1: fixed-width text rows
+            if _parse_text_rows(text):
+                continue
+
+            # Strategy 2: multirow merged cells
+            has_multirow = any(
+                _MULTIROW_DATE_RE.search(str(cell or ""))
+                for table in (page.extract_tables() or [])
+                for row in (table or [])
+                for cell in (row or [])
+                if cell and "\n" in str(cell)
+            )
+            if has_multirow:
+                continue
+
+            # Strategy 3: structured table with a date column
+            has_date_table = any(
+                _detect_columns(table)["date"] is not None
+                for table in (page.extract_tables() or [])
+                if table
+            )
+            if has_date_table:
+                continue
+
+            scanned_indices.append(i)
+
+    if not scanned_indices:
+        return None
+
+    logger.info(
+        "get_scanned_page_bytes: found %d scanned page(s) — indices %s",
+        len(scanned_indices),
+        scanned_indices,
+    )
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    writer = pypdf.PdfWriter()
+    for idx in scanned_indices:
+        writer.add_page(reader.pages[idx])
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()

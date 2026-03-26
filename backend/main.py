@@ -14,7 +14,7 @@ from services.excel_builder import build_excel
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
 from services.mistral_service import MistralExtractionError, extract_with_mistral
 from services.pdf_detector import detect_pdf_type
-from services.pdfplumber_service import extract_with_pdfplumber
+from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from utils.validators import validate_result, validate_row
 
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -71,6 +71,17 @@ def _validate_pdf(file_bytes: bytes, size_bytes: int) -> None:
         )
 
 
+def _sort_key(date_str: str | None) -> tuple[int, int, int]:
+    """Convert 'DD/MM/YYYY' to a (YYYY, MM, DD) tuple for sorting. Invalid dates sort last."""
+    if not date_str:
+        return (9999, 99, 99)
+    try:
+        d, m, y = date_str.split("/")
+        return (int(y), int(m), int(d))
+    except (ValueError, AttributeError):
+        return (9999, 99, 99)
+
+
 async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     """Run extraction pipeline: pdfplumber → gemini → mistral. Returns (result, provider)."""
     pdf_type = detect_pdf_type(pdf_bytes)
@@ -81,6 +92,29 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
 
     if pdf_type == "native":
         rows = extract_with_pdfplumber(pdf_bytes)
+        if rows:
+            # Check for scanned pages mixed into the same PDF (e.g. digital-signature wrappers
+            # around image-only timesheets after the native-text section).
+            scanned_bytes = get_scanned_page_bytes(pdf_bytes)
+            if scanned_bytes:
+                pdf_type = "mixed"
+                logger.info("Hybrid PDF: found scanned pages — running OCR")
+                extra_rows: list | None = None
+                try:
+                    extra_rows = await extract_with_gemini(scanned_bytes)
+                except GeminiExtractionError as e:
+                    logger.warning("Gemini failed on scanned pages: %s — trying Mistral", e)
+                if extra_rows is None:
+                    try:
+                        extra_rows = await extract_with_mistral(scanned_bytes)
+                        provider = "pdfplumber+mistral"
+                    except MistralExtractionError as e:
+                        logger.warning("Mistral also failed on scanned pages: %s", e)
+                elif extra_rows:
+                    provider = "pdfplumber+gemini"
+                if extra_rows:
+                    rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                    logger.info("Hybrid merge — total rows=%d", len(rows))
 
     if rows is None:
         provider = "gemini"
