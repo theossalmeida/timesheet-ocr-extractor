@@ -1,33 +1,33 @@
 # Timesheet Extractor
 
-Extrai registros de ponto de PDFs trabalhistas brasileiros e gera Excel + CSV (PJeCalc) prontos para uso.
+Extracts timesheet records from Brazilian labor PDFs and generates Excel + CSV (PJeCalc) files ready for use.
 
-Suporta dois modos:
+Supports two modes:
 
-- **Cartão de Ponto** — PDFs de folha de ponto (nativos ou escaneados)
-- **Guia Ministerial** — Papeletas de serviço externo (ex: motoristas)
+- **Cartão de Ponto** — standard timecard PDFs (native or scanned)
+- **Guia Ministerial** — external service logs (e.g. drivers' ministerial guides)
 
-## Como funciona
+## How it works
 
 ```
 PDF → pdfplumber → Gemini 3 Flash (fallback / OCR)
                                     ↓
-                          Excel estilizado + CSV PJeCalc
+                         Styled Excel + PJeCalc CSV
 ```
 
-O backend tenta extração nativa via `pdfplumber` primeiro. Se o PDF for escaneado ou a extração falhar, usa Gemini 3 Flash. Guia ministerial usa Gemini 3 Flash diretamente por chunks com progresso em tempo real via SSE.
+The backend first attempts native extraction via `pdfplumber`. If the PDF is scanned or extraction fails, it falls back to Gemini 3 Flash. Ministerial guides are processed directly by Gemini in chunks, with real-time progress streamed via SSE.
 
 ## Stack
 
-| Camada | Tecnologia |
+| Layer | Technology |
 |---|---|
 | Backend | FastAPI + Python 3.12 |
-| Extração | pdfplumber, Google Gemini 3 Flash |
+| Extraction | pdfplumber, Google Gemini 3 Flash |
 | Excel | openpyxl |
 | Frontend | Next.js 14 + TypeScript + Tailwind |
-| Deploy | Fly.io (região `gru` — São Paulo) |
+| Deploy | Fly.io (region `gru` — São Paulo) |
 
-## Rodando localmente
+## Running locally
 
 ### Backend
 
@@ -37,11 +37,11 @@ python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env  # edite com suas chaves
+cp .env.example .env  # fill in your keys
 uvicorn main:app --reload --port 8000
 ```
 
-`.env` necessário:
+Required `.env`:
 
 ```env
 GEMINI_API_KEY=...
@@ -58,29 +58,29 @@ echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
 npm run dev
 ```
 
-Acesse `http://localhost:3000`.
+Open `http://localhost:3000`.
 
 ## Endpoints
 
-| Método | Rota | Descrição |
+| Method | Route | Description |
 |---|---|---|
 | `GET` | `/health` | Health check |
-| `POST` | `/extract` | Extrai cartão de ponto → JSON com Excel + CSV em base64 |
-| `POST` | `/extract/guia` | Extrai guia ministerial → SSE com progresso + resultado final |
-| `POST` | `/preview` | Extrai sem gerar arquivos (debug) |
+| `POST` | `/extract` | Extract timecard → JSON with Excel + CSV as base64 |
+| `POST` | `/extract/guia` | Extract ministerial guide → SSE stream with progress + final result |
+| `POST` | `/preview` | Extract without generating files (debug) |
 
-Rate limit: 10 req/min por IP.
+Rate limit: 10 req/min per IP.
 
 ## Deploy (Fly.io)
 
-Dois apps na org Personal, região São Paulo:
+Two apps under the Personal org, São Paulo region:
 
 ```
-timesheet-api             → backend  (1GB RAM)
-timesheet-app-damp-forest-8112 → frontend (512MB RAM)
+timesheet-api                  → backend  (1 GB RAM)
+timesheet-app-damp-forest-8112 → frontend (512 MB RAM)
 ```
 
-Ambos suspendem automaticamente quando ociosos (`min_machines_running = 0`).
+Both suspend automatically when idle (`min_machines_running = 0`).
 
 ### Backend
 
@@ -88,32 +88,31 @@ Ambos suspendem automaticamente quando ociosos (`min_machines_running = 0`).
 cd backend
 fly secrets set \
   GEMINI_API_KEY="..." \
-  MISTRAL_API_KEY="..." \
   CORS_ORIGINS='["https://timesheet-app-damp-forest-8112.fly.dev"]'
 fly deploy
 ```
 
 ### Frontend
 
-`NEXT_PUBLIC_API_URL` já está configurada como build arg no `fly.toml` — sem secrets adicionais.
+`NEXT_PUBLIC_API_URL` is already set as a build arg in `fly.toml` — no additional secrets needed.
 
 ```bash
 cd frontend
 fly deploy
 ```
 
-## Formatos de PDF suportados
+## Supported PDF formats
 
-- Tabela nativa com colunas de entrada/saída
-- Multirow com células mescladas (DD/mmm/YY)
-- Texto fixo — formato "FOLHA DE PONTO"
-- PDFs escaneados (via Gemini OCR)
-- PDFs mistos (páginas nativas + escaneadas)
+- Native table with entry/exit columns
+- Multirow with merged cells (DD/mmm/YY)
+- Fixed-width text — "FOLHA DE PONTO" format
+- Scanned PDFs (via Gemini 3 Flash OCR)
+- Hybrid PDFs (mix of native and scanned pages)
 
-## Saída
+## Output
 
-**Excel** — duas abas:
-- *Registros de Ponto*: linhas com data, entradas/saídas, ocorrência (cores por tipo)
-- *Resumo*: total de registros, intervalo de datas, contagem por tipo de ocorrência
+**Excel** — two sheets:
+- *Timesheet Records*: rows with date, entry/exit times, occurrence type (color-coded)
+- *Summary*: total records, date range, count by occurrence type
 
-**CSV** — formato PJeCalc (`;` delimitado, UTF-8 BOM), com todos os dias do calendário preenchidos.
+**CSV** — PJeCalc format (`;` delimited, UTF-8 BOM), with every calendar day filled in.

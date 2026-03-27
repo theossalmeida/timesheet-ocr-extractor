@@ -40,6 +40,7 @@ frontend/tsconfig.tsbuildinfo
 
 # Sample / personal documents
 exemplos/
+linkedin*
 
 # OS
 .DS_Store
