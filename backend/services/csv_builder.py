@@ -1,7 +1,4 @@
 from __future__ import annotations
-import io
-import zipfile
-from collections import defaultdict
 from datetime import date, timedelta
 from models.timesheet import ExtractionResult, TimesheetRow
 
@@ -69,26 +66,6 @@ def _build_csv_for_rows(rows: list[TimesheetRow]) -> str:
 
 
 def build_guia_csv(rows: list[TimesheetRow]) -> tuple[bytes, str]:
-    """Build CSV(s) for Guia Ministerial rows.
-
-    Returns (content_bytes, content_type).
-    - Single worker → UTF-8 BOM CSV bytes, content_type='text/csv'
-    - Multiple workers → ZIP bytes with one CSV per worker, content_type='application/zip'
-    """
-    workers: dict[str, list[TimesheetRow]] = defaultdict(list)
-    for row in rows:
-        key = row.worker_name or "DESCONHECIDO"
-        workers[key].append(row)
-
-    if len(workers) == 1:
-        worker_rows = next(iter(workers.values()))
-        csv_text = _build_csv_for_rows(worker_rows)
-        return csv_text.encode("utf-8-sig"), "text/csv"
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for worker_name, worker_rows in workers.items():
-            csv_text = _build_csv_for_rows(worker_rows)
-            safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in worker_name)
-            zf.writestr(f"{safe_name}.csv", csv_text.encode("utf-8-sig"))
-    return buf.getvalue(), "application/zip"
+    """Build a PJeCalc CSV for Guia Ministerial rows (single worker assumed)."""
+    csv_text = _build_csv_for_rows(rows)
+    return csv_text.encode("utf-8-sig"), "text/csv"

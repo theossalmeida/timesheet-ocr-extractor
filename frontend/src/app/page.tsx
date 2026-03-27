@@ -45,6 +45,7 @@ export default function Home() {
             <UploadZone
               onFile={(file) => extraction.upload(file, mode)}
               status={extraction.status}
+              mode={mode}
             />
           )}
 
