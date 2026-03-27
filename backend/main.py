@@ -15,7 +15,6 @@ from services.csv_builder import build_csv
 from services.excel_builder import build_excel
 from services.guia_ministerial_service import stream_guia_extraction
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
-from services.mistral_service import MistralExtractionError, extract_with_mistral
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from utils.validators import validate_result, validate_row
@@ -86,7 +85,7 @@ def _sort_key(date_str: str | None) -> tuple[int, int, int]:
 
 
 async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
-    """Run extraction pipeline: pdfplumber → gemini → mistral. Returns (result, provider)."""
+    """Run extraction pipeline: pdfplumber → gemini. Returns (result, provider)."""
     pdf_type = detect_pdf_type(pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
 
@@ -101,38 +100,22 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
             scanned_bytes = get_scanned_page_bytes(pdf_bytes)
             if scanned_bytes:
                 pdf_type = "mixed"
-                logger.info("Hybrid PDF: found scanned pages — running OCR")
-                extra_rows: list | None = None
+                logger.info("Hybrid PDF: found scanned pages — running Gemini OCR")
                 try:
                     extra_rows = await extract_with_gemini(scanned_bytes)
+                    if extra_rows:
+                        provider = "pdfplumber+gemini"
+                        rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                        logger.info("Hybrid merge — total rows=%d", len(rows))
                 except GeminiExtractionError as e:
-                    logger.warning("Gemini failed on scanned pages: %s — trying Mistral", e)
-                if extra_rows is None:
-                    try:
-                        extra_rows = await extract_with_mistral(scanned_bytes)
-                        provider = "pdfplumber+mistral"
-                    except MistralExtractionError as e:
-                        logger.warning("Mistral also failed on scanned pages: %s", e)
-                elif extra_rows:
-                    provider = "pdfplumber+gemini"
-                if extra_rows:
-                    rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                    logger.info("Hybrid merge — total rows=%d", len(rows))
+                    logger.warning("Gemini failed on scanned pages: %s", e)
 
     if rows is None:
         provider = "gemini"
         try:
             rows = await extract_with_gemini(pdf_bytes)
         except GeminiExtractionError as e:
-            logger.warning("Gemini failed: %s — falling back to Mistral", e)
-            rows = None
-
-    if rows is None:
-        provider = "mistral"
-        try:
-            rows = await extract_with_mistral(pdf_bytes)
-        except MistralExtractionError as e:
-            logger.error("Mistral failed: %s", e)
+            logger.error("Gemini failed: %s", e)
             raise HTTPException(
                 status_code=422,
                 detail="Não foi possível extrair registros de ponto deste PDF.",

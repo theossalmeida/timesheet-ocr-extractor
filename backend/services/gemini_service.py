@@ -14,7 +14,7 @@ from utils.normalizers import normalize_date, normalize_time, normalize_ocorrenc
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
+    "gemini-3-flash-preview:generateContent"
 )
 
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
