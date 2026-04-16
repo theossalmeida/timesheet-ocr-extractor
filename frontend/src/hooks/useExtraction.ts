@@ -70,9 +70,9 @@ export function useExtraction(): ExtractionHook {
       }
 
       try {
-        const handleChunkProgress = (chunk: number, total: number) => {
+        const handleChunkProgress = (chunk: number, total: number, message?: string) => {
           const pct = Math.round((chunk / total) * 80) + 10;
-          setProgress(pct, `Processando parte ${chunk} de ${total}...`);
+          setProgress(pct, message ?? `Processando parte ${chunk} de ${total}...`);
         };
 
         if (mode === "contracheque") {

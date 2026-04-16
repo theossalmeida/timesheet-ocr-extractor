@@ -159,7 +159,7 @@ export async function extractGuia(
 
 export async function extractContracheque(
   file: File,
-  onProgress?: (chunk: number, total: number) => void,
+  onProgress?: (chunk: number, total: number, message?: string) => void,
 ): Promise<ContrachequeBundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -209,7 +209,7 @@ export async function extractContracheque(
       }
 
       if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number);
+        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
       } else if (event.type === "done") {
         return {
           excelBlob: b64ToBlob(
@@ -218,7 +218,7 @@ export async function extractContracheque(
           ),
           excelFilename: event.excel_filename as string,
           monthsExtracted: (event.months_extracted as number) ?? 0,
-          provider: (event.provider as string) ?? "gemini-contracheque",
+          provider: (event.provider as string) ?? "pdfplumber",
         };
       } else if (event.type === "error") {
         throw new ApiError((event.message as string) ?? "Erro ao processar contracheque.", 422);
