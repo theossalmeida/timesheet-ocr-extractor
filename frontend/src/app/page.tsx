@@ -11,6 +11,7 @@ import type { ExtractionMode } from "@/lib/types";
 const MODE_DESCRIPTIONS: Record<ExtractionMode, string> = {
   cartao: "Faça upload do PDF de cartão de ponto e baixe a planilha Excel formatada.",
   guia: "Faça upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
+  contracheque: "Faça upload do PDF de contracheques da Petrobras e baixe a ficha salarial em Excel organizada por ano e mês.",
 };
 
 export default function Home() {
@@ -55,6 +56,7 @@ export default function Home() {
               progress={extraction.progress}
               stepLabel={extraction.stepLabel}
               resultUrl={extraction.resultUrl}
+              excelFilename={extraction.excelFilename}
               csvUrl={extraction.csvUrl}
               csvExt={extraction.csvExt}
               rowCount={extraction.rowCount}

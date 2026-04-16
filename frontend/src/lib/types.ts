@@ -29,7 +29,7 @@ export interface ExtractionResult {
   total_rows: number;
 }
 
-export type ExtractionMode = "cartao" | "guia";
+export type ExtractionMode = "cartao" | "guia" | "contracheque";
 
 export type ExtractionStatus =
   | "idle"
@@ -43,6 +43,7 @@ export interface ExtractionState {
   progress: number;
   stepLabel: string;
   resultUrl: string | null;
+  excelFilename: string | null;
   csvUrl: string | null;
   csvExt: string;
   rowCount: number | null;

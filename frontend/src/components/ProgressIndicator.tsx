@@ -8,6 +8,7 @@ interface ProgressIndicatorProps {
   progress: number;
   stepLabel: string;
   resultUrl: string | null;
+  excelFilename: string | null;
   csvUrl: string | null;
   csvExt: string;
   rowCount: number | null;
@@ -18,6 +19,7 @@ export function ProgressIndicator({
   progress,
   stepLabel,
   resultUrl,
+  excelFilename,
   csvUrl,
   csvExt,
   rowCount,
@@ -26,6 +28,10 @@ export function ProgressIndicator({
 
   const isLoading = status === "uploading" || status === "processing";
   const isDone = status === "done";
+
+  const isContracheque = excelFilename?.startsWith("contracheque_") ?? false;
+  const excelLabel = isContracheque ? "Baixar Ficha Salarial (Excel)" : "Baixar Timesheet (Excel)";
+  const downloadFilename = excelFilename ?? "timesheet.xlsx";
 
   const csvLabel =
     csvExt === "zip"
@@ -47,10 +53,10 @@ export function ProgressIndicator({
         <div className="flex flex-col gap-2 pt-2">
           <a
             href={resultUrl}
-            download="timesheet.xlsx"
+            download={downloadFilename}
             className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700"
           >
-            Baixar Timesheet (Excel)
+            {excelLabel}
           </a>
           {csvUrl && (
             <a

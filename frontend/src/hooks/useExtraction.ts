@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { extractTimesheet, extractGuia, ApiError } from "@/lib/api";
+import { extractTimesheet, extractGuia, extractContracheque, ApiError } from "@/lib/api";
 import type { ExtractionHook, ExtractionMode, ExtractionState } from "@/lib/types";
 
 const IDLE_STATE: ExtractionState = {
@@ -9,6 +9,7 @@ const IDLE_STATE: ExtractionState = {
   progress: 0,
   stepLabel: "",
   resultUrl: null,
+  excelFilename: null,
   csvUrl: null,
   csvExt: "csv",
   rowCount: null,
@@ -32,6 +33,7 @@ export function useExtraction(): ExtractionHook {
         progress: 0,
         stepLabel: "Enviando arquivo...",
         resultUrl: null,
+        excelFilename: null,
         csvUrl: null,
         csvExt: "csv",
         rowCount: null,
@@ -42,10 +44,10 @@ export function useExtraction(): ExtractionHook {
       setState((s) => ({ ...s, status: "processing" }));
 
       // Cartão de ponto: simulate progress stages (single blocking call)
-      // Guia ministerial: real per-chunk progress via SSE — no simulation needed
+      // Guia / Contracheque: real per-chunk progress via SSE — no simulation needed
       let interval: ReturnType<typeof setInterval> | undefined;
 
-      if (mode !== "guia") {
+      if (mode !== "guia" && mode !== "contracheque") {
         const stages: Array<[number, string]> = [
           [10, "Enviando arquivo..."],
           [20, "Arquivo recebido. Analisando PDF..."],
@@ -68,38 +70,63 @@ export function useExtraction(): ExtractionHook {
       }
 
       try {
-        const handleGuiaProgress = (chunk: number, total: number) => {
+        const handleChunkProgress = (chunk: number, total: number) => {
           const pct = Math.round((chunk / total) * 80) + 10;
-          setProgress(pct, `Processando chunk ${chunk} de ${total}...`);
+          setProgress(pct, `Processando parte ${chunk} de ${total}...`);
         };
 
-        const result = await (
-          mode === "guia"
-            ? extractGuia(file, handleGuiaProgress)
-            : extractTimesheet(file)
-        );
-        clearInterval(interval);
+        if (mode === "contracheque") {
+          const result = await extractContracheque(file, handleChunkProgress);
+          clearInterval(interval);
 
-        setProgress(95, "Quase pronto...");
-        await new Promise((r) => setTimeout(r, 300));
+          setProgress(95, "Quase pronto...");
+          await new Promise((r) => setTimeout(r, 300));
 
-        const excelUrl = URL.createObjectURL(result.excelBlob);
-        resultUrlRef.current = excelUrl;
+          const excelUrl = URL.createObjectURL(result.excelBlob);
+          resultUrlRef.current = excelUrl;
 
-        const csvUrl = URL.createObjectURL(result.csvBlob);
-        csvUrlRef.current = csvUrl;
+          setState({
+            status: "done",
+            progress: 100,
+            stepLabel: `${result.monthsExtracted} ${result.monthsExtracted === 1 ? "mês processado" : "meses processados"}!`,
+            resultUrl: excelUrl,
+            excelFilename: result.excelFilename,
+            csvUrl: null,
+            csvExt: "csv",
+            rowCount: result.monthsExtracted,
+            provider: result.provider,
+            error: null,
+          });
+        } else {
+          const result = await (
+            mode === "guia"
+              ? extractGuia(file, handleChunkProgress)
+              : extractTimesheet(file)
+          );
+          clearInterval(interval);
 
-        setState({
-          status: "done",
-          progress: 100,
-          stepLabel: `${result.rowCount} registros foram extraídos!`,
-          resultUrl: excelUrl,
-          csvUrl,
-          csvExt: result.csvExt,
-          rowCount: result.rowCount,
-          provider: result.provider,
-          error: null,
-        });
+          setProgress(95, "Quase pronto...");
+          await new Promise((r) => setTimeout(r, 300));
+
+          const excelUrl = URL.createObjectURL(result.excelBlob);
+          resultUrlRef.current = excelUrl;
+
+          const csvUrl = URL.createObjectURL(result.csvBlob);
+          csvUrlRef.current = csvUrl;
+
+          setState({
+            status: "done",
+            progress: 100,
+            stepLabel: `${result.rowCount} registros foram extraídos!`,
+            resultUrl: excelUrl,
+            excelFilename: result.excelFilename,
+            csvUrl,
+            csvExt: result.csvExt,
+            rowCount: result.rowCount,
+            provider: result.provider,
+            error: null,
+          });
+        }
       } catch (err) {
         if (interval) clearInterval(interval);
         const message =
@@ -111,6 +138,7 @@ export function useExtraction(): ExtractionHook {
           progress: 0,
           stepLabel: "",
           resultUrl: null,
+          excelFilename: null,
           csvUrl: null,
           csvExt: "csv",
           rowCount: null,
