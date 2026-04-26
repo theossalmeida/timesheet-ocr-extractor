@@ -37,6 +37,7 @@ frontend/tsconfig.tsbuildinfo
 # Generated files
 *.xlsx
 *.xls
+*.pdf
 
 # Sample / personal documents
 exemplos/
@@ -52,3 +53,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+NEW_FEATURE.md
+
+*.md

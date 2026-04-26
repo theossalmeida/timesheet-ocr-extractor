@@ -6,6 +6,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 MONTHS_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+COLUMNS_LETTER = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M']
+
+FORMULAS = {
+    'Total Apurado': '=SUM({cell1}:{cell2})',
+    'Descontos': '',
+    'Base FGTS': '={cell1}-{cell2}',
+    'FGTS Devido': '={cell1}*8%',
+    'FGTS Pago': '',
+    'Diferença FGTS': '={cell1}-{cell2}',
+}
 
 _HEADER_FILL = PatternFill("solid", fgColor="1E3A5F")
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
@@ -57,6 +67,9 @@ def build_contracheque_excel(
         if not descriptions:
             continue
 
+        formulas_descriptions = ["", "Total Apurado", "Descontos", "Base FGTS", "FGTS Devido", "FGTS Pago", "Diferença FGTS"]
+        for formula_desc in formulas_descriptions: descriptions.append(formula_desc) 
+
         # ── Title row ────────────────────────────────────────────────
         title_cell = ws.cell(row=current_row, column=1, value=f"Ficha Salarial {year}")
         title_cell.font = _TITLE_FONT
@@ -86,7 +99,7 @@ def build_contracheque_excel(
 
         ws.row_dimensions[current_row].height = 18
         current_row += 1
-
+        initial_row = current_row
         # ── Data rows ────────────────────────────────────────────────
         for row_idx, desc in enumerate(descriptions):
             fill = _ALT_FILL if row_idx % 2 == 0 else _NO_FILL
@@ -99,7 +112,21 @@ def build_contracheque_excel(
 
             for month_idx in range(12):
                 month_key = str(month_idx + 1)
-                valor = months_data.get(month_key, {}).get(desc)
+
+                if desc == 'Total Apurado':
+                    column_letter = COLUMNS_LETTER[month_idx+1]
+                    valor = f'=SUM({column_letter}{initial_row}:{column_letter}{current_row-1})'
+
+                elif desc == 'Diferença FGTS' or desc == 'Base FGTS':
+                    column_letter = COLUMNS_LETTER[month_idx+1]
+                    valor = f'={column_letter}{current_row-2}-{column_letter}{current_row-1}'
+
+                elif desc == 'FGTS Devido':
+                    column_letter = COLUMNS_LETTER[month_idx+1]
+                    valor = f'={column_letter}{current_row-1}*8%'
+
+                else: 
+                    valor = months_data.get(month_key, {}).get(desc)
                 col = month_idx + 2
                 cell = ws.cell(row=current_row, column=col, value=valor)
                 cell.font = _VALUE_FONT

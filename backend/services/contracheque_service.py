@@ -378,7 +378,7 @@ async def stream_contracheque_extraction(
         # ── Step 1: pdfplumber ──────────────────────────────────────
         yield f"data: {_json.dumps({'type': 'progress', 'chunk': 0, 'total': 1, 'step': 'pdfplumber', 'message': f'Analisando {total_pages} páginas com pdfplumber...'})}\n\n"
 
-        plumber_results, failed_indices = await asyncio.get_event_loop().run_in_executor(
+        plumber_results, failed_indices = await asyncio.get_running_loop().run_in_executor(
             None, _extract_all_pdfplumber, pdf_bytes
         )
 
