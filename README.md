@@ -1,21 +1,24 @@
 # Timesheet Extractor
 
-Extracts timesheet records from Brazilian labor PDFs and generates Excel + CSV (PJeCalc) files ready for use.
+Extracts Brazilian labor PDFs and generates Excel/CSV files ready for use.
 
-Supports two modes:
+Supported modes:
 
-- **Cartão de Ponto** — standard timecard PDFs (native or scanned)
-- **Guia Ministerial** — external service logs (e.g. drivers' ministerial guides)
+- **Cartao de Ponto** - standard timecard PDFs, native or scanned
+- **Guia Ministerial** - external service logs, such as drivers' ministerial guides
+- **Contracheque** - Petrobras paycheck PDFs into yearly salary sheets
+- **Horas Extras** - Petrobras paycheck PDFs into a month-by-month Excel with one dynamic column per extra-hour item
 
-## How it works
+## How It Works
 
+```text
+PDF -> pdfplumber -> Gemini 3 Flash when native extraction fails
+                         |
+                         v
+                 Styled Excel / PJeCalc CSV
 ```
-PDF → pdfplumber → Gemini 3 Flash (fallback / OCR)
-                                    ↓
-                         Styled Excel + PJeCalc CSV
-```
 
-The backend first attempts native extraction via `pdfplumber`. If the PDF is scanned or extraction fails, it falls back to Gemini 3 Flash. Ministerial guides are processed directly by Gemini in chunks, with real-time progress streamed via SSE.
+The backend first attempts native extraction with `pdfplumber`. If a page cannot be parsed, the paycheck and extra-hours flows send only the failed pages to Gemini. Ministerial guides are processed by Gemini in chunks, with real-time progress streamed through SSE.
 
 ## Stack
 
@@ -25,9 +28,9 @@ The backend first attempts native extraction via `pdfplumber`. If the PDF is sca
 | Extraction | pdfplumber, Google Gemini 3 Flash |
 | Excel | openpyxl |
 | Frontend | Next.js 14 + TypeScript + Tailwind |
-| Deploy | Fly.io (region `gru` — São Paulo) |
+| Deploy | Fly.io, region `gru` |
 
-## Running locally
+## Running Locally
 
 ### Backend
 
@@ -65,19 +68,21 @@ Open `http://localhost:3000`.
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/health` | Health check |
-| `POST` | `/extract` | Extract timecard → JSON with Excel + CSV as base64 |
-| `POST` | `/extract/guia` | Extract ministerial guide → SSE stream with progress + final result |
-| `POST` | `/preview` | Extract without generating files (debug) |
+| `POST` | `/extract` | Extract timecard to JSON with Excel + CSV as base64 |
+| `POST` | `/extract/guia` | Extract ministerial guide to an SSE stream with progress and final result |
+| `POST` | `/contracheque` | Extract Petrobras paychecks to a salary Excel through SSE |
+| `POST` | `/contracheque/horas-extras` | Extract only extra-hour paycheck items to a dynamic Excel through SSE |
+| `POST` | `/preview` | Extract without generating files, for debugging |
 
 Rate limit: 10 req/min per IP.
 
-## Deploy (Fly.io)
+## Deploy
 
-Two apps under the Personal org, São Paulo region:
+Two Fly.io apps under the Personal org, Sao Paulo region:
 
-```
-timesheet-api                  → backend  (1 GB RAM)
-timesheet-app-damp-forest-8112 → frontend (512 MB RAM)
+```text
+timesheet-api                  -> backend  (1 GB RAM)
+timesheet-app-damp-forest-8112 -> frontend (512 MB RAM)
 ```
 
 Both suspend automatically when idle (`min_machines_running = 0`).
@@ -94,25 +99,31 @@ fly deploy
 
 ### Frontend
 
-`NEXT_PUBLIC_API_URL` is already set as a build arg in `fly.toml` — no additional secrets needed.
+`NEXT_PUBLIC_API_URL` is already set as a build arg in `fly.toml`, so no additional secrets are needed.
 
 ```bash
 cd frontend
 fly deploy
 ```
 
-## Supported PDF formats
+## Supported PDF Formats
 
 - Native table with entry/exit columns
-- Multirow with merged cells (DD/mmm/YY)
-- Fixed-width text — "FOLHA DE PONTO" format
-- Scanned PDFs (via Gemini 3 Flash OCR)
-- Hybrid PDFs (mix of native and scanned pages)
+- Multirow with merged cells, such as `DD/mmm/YY`
+- Fixed-width text in `FOLHA DE PONTO` format
+- Petrobras paycheck PDFs
+- Scanned PDFs through Gemini 3 Flash OCR
+- Hybrid PDFs mixing native and scanned pages
 
 ## Output
 
-**Excel** — two sheets:
-- *Timesheet Records*: rows with date, entry/exit times, occurrence type (color-coded)
-- *Summary*: total records, date range, count by occurrence type
+**Cartao de Ponto Excel** - two sheets:
 
-**CSV** — PJeCalc format (`;` delimited, UTF-8 BOM), with every calendar day filled in.
+- *Timesheet Records*: rows with date, entry/exit times, and occurrence type
+- *Summary*: total records, date range, and occurrence type counts
+
+**PJeCalc CSV** - `;` delimited, UTF-8 BOM, with every calendar day filled in.
+
+**Contracheque Excel** - salary sheets organized by year and month.
+
+**Horas Extras Excel** - one row per month, one dynamic column per extra-hour item, and a final total column.

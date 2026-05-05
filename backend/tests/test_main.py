@@ -123,3 +123,19 @@ def test_preview_invalid_pdf():
     data = io.BytesIO(b"garbage data")
     r = client.post("/preview", files={"file": ("test.pdf", data, "application/pdf")})
     assert r.status_code == 400
+
+
+def test_contracheque_extra_hours_stream_route():
+    async def fake_stream(pdf_bytes: bytes, original_stem: str):
+        yield 'data: {"type":"done","months_extracted":1,"columns_extracted":1}\n\n'
+
+    with patch("main.stream_contracheque_extra_hours_extraction", fake_stream):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post(
+            "/contracheque/horas-extras",
+            files={"file": ("contracheque.pdf", data, "application/pdf")},
+        )
+
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    assert '"type":"done"' in r.text

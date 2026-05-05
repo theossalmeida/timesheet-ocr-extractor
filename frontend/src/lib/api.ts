@@ -25,6 +25,10 @@ export interface ContrachequeBundleResult {
   provider: string;
 }
 
+export interface ExtraHoursBundleResult extends ContrachequeBundleResult {
+  columnsExtracted: number;
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function b64ToBlob(b64: string, mimeType: string): Blob {
@@ -222,6 +226,78 @@ export async function extractContracheque(
         };
       } else if (event.type === "error") {
         throw new ApiError((event.message as string) ?? "Erro ao processar contracheque.", 422);
+      }
+    }
+  }
+
+  throw new ApiError("Processamento interrompido inesperadamente.", 500);
+}
+
+export async function extractContrachequeExtraHours(
+  file: File,
+  onProgress?: (chunk: number, total: number, message?: string) => void,
+): Promise<ExtraHoursBundleResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/contracheque/horas-extras`, {
+      method: "POST",
+      body: form,
+    });
+  } catch {
+    throw new ApiError("NÃ£o foi possÃ­vel conectar ao servidor.", 0);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(
+      await _parseError(response, "Erro ao processar as horas extras do contracheque."),
+      response.status,
+    );
+  }
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop()!;
+
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (!trimmed || trimmed.startsWith(":")) continue;
+
+      const dataLine = trimmed.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(dataLine.slice(6));
+      } catch {
+        continue;
+      }
+
+      if (event.type === "progress") {
+        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+      } else if (event.type === "done") {
+        return {
+          excelBlob: b64ToBlob(
+            event.excel_b64 as string,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          ),
+          excelFilename: event.excel_filename as string,
+          monthsExtracted: (event.months_extracted as number) ?? 0,
+          columnsExtracted: (event.columns_extracted as number) ?? 0,
+          provider: (event.provider as string) ?? "pdfplumber",
+        };
+      } else if (event.type === "error") {
+        throw new ApiError((event.message as string) ?? "Erro ao processar horas extras.", 422);
       }
     }
   }

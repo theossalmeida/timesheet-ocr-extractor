@@ -13,6 +13,9 @@ from config import settings
 from models.timesheet import ExtractionResult
 from services.csv_builder import build_csv
 from services.excel_builder import build_excel
+from services.contracheque_extra_hours_service import (
+    stream_contracheque_extra_hours_extraction,
+)
 from services.contracheque_service import stream_contracheque_extraction
 from services.guia_ministerial_service import stream_guia_extraction
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
@@ -231,6 +234,30 @@ async def extract_contracheque(request: Request, file: UploadFile = File(...)):
 
     return StreamingResponse(
         stream_contracheque_extraction(pdf_bytes, original_stem),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/contracheque/horas-extras")
+@limiter.limit("10/minute")
+async def extract_contracheque_horas_extras(request: Request, file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    logger.info(
+        "POST /contracheque/horas-extras - filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
+    _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
+
+    original_stem = (file.filename or "contracheque").removesuffix(".pdf").removesuffix(".PDF")
+
+    return StreamingResponse(
+        stream_contracheque_extra_hours_extraction(pdf_bytes, original_stem),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
