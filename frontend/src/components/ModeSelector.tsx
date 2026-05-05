@@ -13,11 +13,12 @@ const TABS: Array<{ key: ExtractionMode; label: string }> = [
   { key: "guia", label: "Guia Ministerial" },
   { key: "contracheque", label: "Contracheque" },
   { key: "horas_extras", label: "Horas Extras" },
+  { key: "frequencia", label: "Frequencia" },
 ];
 
 export function ModeSelector({ mode, onChange, disabled }: ModeSelectorProps) {
   return (
-    <div className="grid grid-cols-2 gap-1 rounded-lg border border-gray-200 p-1 sm:flex">
+    <div className="grid grid-cols-2 gap-1 rounded-lg border border-gray-200 p-1 sm:grid-cols-3">
       {TABS.map(({ key, label }) => (
         <button
           key={key}

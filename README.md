@@ -8,6 +8,7 @@ Supported modes:
 - **Guia Ministerial** - external service logs, such as drivers' ministerial guides
 - **Contracheque** - Petrobras paycheck PDFs into yearly salary sheets
 - **Horas Extras** - Petrobras paycheck PDFs into a month-by-month Excel with one dynamic column per extra-hour item
+- **Frequencia** - Petrobras frequency reports into daily embarked/off-cycle classifications
 
 ## How It Works
 
@@ -70,6 +71,7 @@ Open `http://localhost:3000`.
 | `GET` | `/health` | Health check |
 | `POST` | `/extract` | Extract timecard to JSON with Excel + CSV as base64 |
 | `POST` | `/extract/guia` | Extract ministerial guide to an SSE stream with progress and final result |
+| `POST` | `/extract/frequencia` | Classify Petrobras frequency report days into cycle situations |
 | `POST` | `/contracheque` | Extract Petrobras paychecks to a salary Excel through SSE |
 | `POST` | `/contracheque/horas-extras` | Extract only extra-hour paycheck items to a dynamic Excel through SSE |
 | `POST` | `/preview` | Extract without generating files, for debugging |
@@ -112,6 +114,7 @@ fly deploy
 - Multirow with merged cells, such as `DD/mmm/YY`
 - Fixed-width text in `FOLHA DE PONTO` format
 - Petrobras paycheck PDFs
+- Petrobras frequency reports with `FOLG` / `HS02` daily rows
 - Scanned PDFs through Gemini 3 Flash OCR
 - Hybrid PDFs mixing native and scanned pages
 
@@ -127,3 +130,5 @@ fly deploy
 **Contracheque Excel** - salary sheets organized by year and month.
 
 **Horas Extras Excel** - one row per month, one dynamic column per extra-hour item, and a final total column.
+
+**Frequencia Excel** - one row per day with cycle day, calculated situation, scale, PDF markers, and a summary sheet.

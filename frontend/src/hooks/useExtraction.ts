@@ -6,6 +6,7 @@ import {
   extractGuia,
   extractContracheque,
   extractContrachequeExtraHours,
+  extractFrequencia,
   ApiError,
 } from "@/lib/api";
 import type { ExtractionHook, ExtractionMode, ExtractionState } from "@/lib/types";
@@ -108,6 +109,28 @@ export function useExtraction(): ExtractionHook {
             csvUrl: null,
             csvExt: "csv",
             rowCount: result.monthsExtracted,
+            provider: result.provider,
+            error: null,
+          });
+        } else if (mode === "frequencia") {
+          const result = await extractFrequencia(file);
+          clearInterval(interval);
+
+          setProgress(95, "Quase pronto...");
+          await new Promise((r) => setTimeout(r, 300));
+
+          const excelUrl = URL.createObjectURL(result.excelBlob);
+          resultUrlRef.current = excelUrl;
+
+          setState({
+            status: "done",
+            progress: 100,
+            stepLabel: `${result.rowCount} dias classificados!`,
+            resultUrl: excelUrl,
+            excelFilename: result.excelFilename,
+            csvUrl: null,
+            csvExt: "csv",
+            rowCount: result.rowCount,
             provider: result.provider,
             error: null,
           });

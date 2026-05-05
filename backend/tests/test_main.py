@@ -139,3 +139,39 @@ def test_contracheque_extra_hours_stream_route():
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
     assert '"type":"done"' in r.text
+
+
+def test_extract_frequencia_success_returns_excel_bundle():
+    from services.frequency_cycle_service import ClassifiedDay
+    from datetime import date
+
+    rows = [
+        ClassifiedDay(
+            date=date(2022, 1, 1),
+            cycle_day=1,
+            situation="FOLGA",
+            core_situation="FOLGA",
+            scale="FOLG",
+            details="",
+            pdf_line="01/01 sab FOLG -1,00 -34,60 Sobreaviso",
+            page=1,
+        )
+    ]
+
+    with (
+        patch("main.extract_and_classify_frequency_cycles", AsyncMock(return_value=(rows, "pdfplumber"))),
+        patch("main.build_frequency_cycle_excel", return_value=b"PKfake"),
+    ):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post(
+            "/extract/frequencia",
+            files={"file": ("frequencia.pdf", data, "application/pdf")},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "excel_b64" in body
+    assert body["excel_filename"] == "frequencia_frequencia.xlsx"
+    assert body["rows_extracted"] == 1
+    assert body["provider"] == "pdfplumber"
+    assert r.headers["x-provider-used"] == "pdfplumber"

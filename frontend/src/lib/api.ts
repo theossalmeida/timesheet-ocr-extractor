@@ -29,6 +29,13 @@ export interface ExtraHoursBundleResult extends ContrachequeBundleResult {
   columnsExtracted: number;
 }
 
+export interface FrequencyBundleResult {
+  excelBlob: Blob;
+  excelFilename: string;
+  rowCount: number;
+  provider: string;
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function b64ToBlob(b64: string, mimeType: string): Blob {
@@ -303,4 +310,46 @@ export async function extractContrachequeExtraHours(
   }
 
   throw new ApiError("Processamento interrompido inesperadamente.", 500);
+}
+
+export async function extractFrequencia(file: File): Promise<FrequencyBundleResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180_000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/extract/frequencia`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("A requisicao excedeu o tempo limite (180s).", 408);
+    }
+    throw new ApiError("Nao foi possivel conectar ao servidor.", 0);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(
+      await _parseError(response, "Erro ao processar o relatorio de frequencia."),
+      response.status,
+    );
+  }
+
+  const data = await response.json();
+  return {
+    excelBlob: b64ToBlob(
+      data.excel_b64,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    excelFilename: data.excel_filename,
+    rowCount: data.rows_extracted ?? 0,
+    provider: data.provider ?? "pdfplumber",
+  };
 }

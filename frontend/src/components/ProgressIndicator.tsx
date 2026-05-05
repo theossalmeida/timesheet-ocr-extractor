@@ -31,11 +31,14 @@ export function ProgressIndicator({
 
   const isContracheque = excelFilename?.startsWith("contracheque_") ?? false;
   const isExtraHours = excelFilename?.startsWith("horas_extras_") ?? false;
+  const isFrequency = excelFilename?.startsWith("frequencia_") ?? false;
   const excelLabel = isExtraHours
     ? "Baixar Horas Extras (Excel)"
-    : isContracheque
-      ? "Baixar Ficha Salarial (Excel)"
-      : "Baixar Timesheet (Excel)";
+    : isFrequency
+      ? "Baixar Ciclos de Frequencia (Excel)"
+      : isContracheque
+        ? "Baixar Ficha Salarial (Excel)"
+        : "Baixar Timesheet (Excel)";
   const downloadFilename = excelFilename ?? "timesheet.xlsx";
 
   const csvLabel =
