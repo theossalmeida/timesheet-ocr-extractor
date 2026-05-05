@@ -7,6 +7,7 @@ import json
 import logging
 import re
 
+import pdfplumber
 import pypdf
 
 from services.contracheque_service import (
@@ -80,6 +81,32 @@ def aggregate_extra_hours(
     return extra_hours_data, columns
 
 
+def _failed_pages_that_need_gemini(pdf_bytes: bytes, failed_indices: list[int]) -> list[int]:
+    indices: list[int] = []
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for idx in failed_indices:
+            text = pdf.pages[idx].extract_text() or ""
+            normalized_text = _normalize_description(text)
+
+            if not normalized_text:
+                indices.append(idx)
+                continue
+
+            has_item_section = bool(re.search(r"C.digo\s+Descri..o\s+Quantidade\s+Valor", normalized_text, re.IGNORECASE))
+            has_extra_hour_hint = is_extra_hour_description(normalized_text)
+
+            if has_item_section and has_extra_hour_hint:
+                indices.append(idx)
+            else:
+                logger.info(
+                    "contracheque extra-hours: skipping Gemini for page %d; no extra-hour item section found",
+                    idx,
+                )
+
+    return indices
+
+
 async def stream_contracheque_extra_hours_extraction(
     pdf_bytes: bytes,
     original_stem: str,
@@ -102,13 +129,14 @@ async def stream_contracheque_extra_hours_extraction(
             pdf_bytes,
         )
         all_pages: list[dict] = list(plumber_results)
+        gemini_indices = _failed_pages_that_need_gemini(pdf_bytes, failed_indices)
 
-        if failed_indices:
+        if gemini_indices:
             logger.info(
                 "contracheque extra-hours: sending %d page(s) to Gemini",
-                len(failed_indices),
+                len(gemini_indices),
             )
-            failed_page_bytes = _split_pages_by_index(pdf_bytes, failed_indices)
+            failed_page_bytes = _split_pages_by_index(pdf_bytes, gemini_indices)
             gemini_chunks = _make_chunks(failed_page_bytes, chunk_size)
             total_chunks = len(gemini_chunks)
 
@@ -152,7 +180,7 @@ async def stream_contracheque_extra_hours_extraction(
 
         provider = (
             "pdfplumber"
-            if not failed_indices
+            if not gemini_indices
             else ("pdfplumber+gemini" if plumber_results else "gemini")
         )
         excel_bytes = build_contracheque_extra_hours_excel(extra_hours_data, columns)

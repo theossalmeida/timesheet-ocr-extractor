@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import io
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import openpyxl
 
@@ -10,6 +13,12 @@ from services.contracheque_extra_hours_excel_builder import (
 from services.contracheque_extra_hours_service import (
     aggregate_extra_hours,
     is_extra_hour_description,
+    stream_contracheque_extra_hours_extraction,
+)
+
+MINIMAL_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n"
+    b"xref\n0 2\ntrailer<</Size 2/Root 1 0 R>>\nstartxref\n9\n%%EOF"
 )
 
 
@@ -72,3 +81,43 @@ def test_extra_hours_excel_has_dynamic_columns_blanks_and_total_formula():
     assert ws.cell(row=2, column=4).value == "=SUM(B2:C2)"
     assert ws.cell(row=3, column=1).value == "05/2021"
     assert ws.cell(row=3, column=4).value == "=SUM(B3:C3)"
+
+
+def test_stream_skips_failed_pages_when_gemini_is_not_needed():
+    page = {
+        "competencia": "04/2021",
+        "itens": [{"descricao": "Hora Extra Interjornada", "valor": 498.79}],
+    }
+
+    async def consume() -> dict:
+        done = None
+        async for event in stream_contracheque_extra_hours_extraction(MINIMAL_PDF, "test"):
+            if event.startswith("data: "):
+                payload = json.loads(event[6:])
+                if payload.get("type") == "done":
+                    done = payload
+        assert done is not None
+        return done
+
+    with (
+        patch(
+            "services.contracheque_extra_hours_service._extract_all_pdfplumber",
+            return_value=([page], [1]),
+        ),
+        patch(
+            "services.contracheque_extra_hours_service._failed_pages_that_need_gemini",
+            return_value=[],
+        ),
+        patch(
+            "services.contracheque_extra_hours_service._process_chunk_gemini",
+            AsyncMock(),
+        ) as gemini_mock,
+        patch(
+            "services.contracheque_extra_hours_service.pypdf.PdfReader",
+            return_value=MagicMock(pages=[object()]),
+        ),
+    ):
+        result = asyncio.run(consume())
+
+    assert result["provider"] == "pdfplumber"
+    gemini_mock.assert_not_called()
