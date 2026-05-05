@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { extractTimesheet, extractGuia, extractContracheque, ApiError } from "@/lib/api";
+import {
+  extractTimesheet,
+  extractGuia,
+  extractContracheque,
+  extractContrachequeExtraHours,
+  ApiError,
+} from "@/lib/api";
 import type { ExtractionHook, ExtractionMode, ExtractionState } from "@/lib/types";
 
 const IDLE_STATE: ExtractionState = {
@@ -43,11 +49,9 @@ export function useExtraction(): ExtractionHook {
 
       setState((s) => ({ ...s, status: "processing" }));
 
-      // Cartão de ponto: simulate progress stages (single blocking call)
-      // Guia / Contracheque: real per-chunk progress via SSE — no simulation needed
       let interval: ReturnType<typeof setInterval> | undefined;
 
-      if (mode !== "guia" && mode !== "contracheque") {
+      if (mode !== "guia" && mode !== "contracheque" && mode !== "horas_extras") {
         const stages: Array<[number, string]> = [
           [10, "Enviando arquivo..."],
           [20, "Arquivo recebido. Analisando PDF..."],
@@ -75,8 +79,12 @@ export function useExtraction(): ExtractionHook {
           setProgress(pct, message ?? `Processando parte ${chunk} de ${total}...`);
         };
 
-        if (mode === "contracheque") {
-          const result = await extractContracheque(file, handleChunkProgress);
+        if (mode === "contracheque" || mode === "horas_extras") {
+          const result = await (
+            mode === "horas_extras"
+              ? extractContrachequeExtraHours(file, handleChunkProgress)
+              : extractContracheque(file, handleChunkProgress)
+          );
           clearInterval(interval);
 
           setProgress(95, "Quase pronto...");
@@ -85,10 +93,16 @@ export function useExtraction(): ExtractionHook {
           const excelUrl = URL.createObjectURL(result.excelBlob);
           resultUrlRef.current = excelUrl;
 
+          const columnsExtracted =
+            "columnsExtracted" in result ? result.columnsExtracted : null;
+
           setState({
             status: "done",
             progress: 100,
-            stepLabel: `${result.monthsExtracted} ${result.monthsExtracted === 1 ? "mês processado" : "meses processados"}!`,
+            stepLabel:
+              columnsExtracted === null
+                ? `${result.monthsExtracted} ${result.monthsExtracted === 1 ? "mes processado" : "meses processados"}!`
+                : `${result.monthsExtracted} meses e ${columnsExtracted} colunas processados!`,
             resultUrl: excelUrl,
             excelFilename: result.excelFilename,
             csvUrl: null,
@@ -117,7 +131,7 @@ export function useExtraction(): ExtractionHook {
           setState({
             status: "done",
             progress: 100,
-            stepLabel: `${result.rowCount} registros foram extraídos!`,
+            stepLabel: `${result.rowCount} registros foram extraidos!`,
             resultUrl: excelUrl,
             excelFilename: result.excelFilename,
             csvUrl,

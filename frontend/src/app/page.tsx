@@ -9,9 +9,10 @@ import { ErrorMessage } from "@/components/ErrorMessage";
 import type { ExtractionMode } from "@/lib/types";
 
 const MODE_DESCRIPTIONS: Record<ExtractionMode, string> = {
-  cartao: "Faça upload do PDF de cartão de ponto e baixe a planilha Excel formatada.",
-  guia: "Faça upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
-  contracheque: "Faça upload do PDF de contracheques da Petrobras e baixe a ficha salarial em Excel organizada por ano e mês.",
+  cartao: "Faca upload do PDF de cartao de ponto e baixe a planilha Excel formatada.",
+  guia: "Faca upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
+  contracheque: "Faca upload do PDF de contracheques da Petrobras e baixe a ficha salarial em Excel organizada por ano e mes.",
+  horas_extras: "Faca upload do PDF de contracheques da Petrobras e baixe uma planilha mensal apenas com verbas de horas extras.",
 };
 
 export default function Home() {
@@ -22,7 +23,7 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-gray-50 p-4">
-      <div className="w-full max-w-xl">
+      <div className="w-full max-w-2xl">
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-bold text-gray-900">
             Extrator de Ponto

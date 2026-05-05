@@ -30,7 +30,12 @@ export function ProgressIndicator({
   const isDone = status === "done";
 
   const isContracheque = excelFilename?.startsWith("contracheque_") ?? false;
-  const excelLabel = isContracheque ? "Baixar Ficha Salarial (Excel)" : "Baixar Timesheet (Excel)";
+  const isExtraHours = excelFilename?.startsWith("horas_extras_") ?? false;
+  const excelLabel = isExtraHours
+    ? "Baixar Horas Extras (Excel)"
+    : isContracheque
+      ? "Baixar Ficha Salarial (Excel)"
+      : "Baixar Timesheet (Excel)";
   const downloadFilename = excelFilename ?? "timesheet.xlsx";
 
   const csvLabel =
