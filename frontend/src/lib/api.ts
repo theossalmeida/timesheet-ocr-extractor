@@ -312,27 +312,21 @@ export async function extractContrachequeExtraHours(
   throw new ApiError("Processamento interrompido inesperadamente.", 500);
 }
 
-export async function extractFrequencia(file: File): Promise<FrequencyBundleResult> {
+export async function extractFrequencia(
+  file: File,
+  onProgress?: (chunk: number, total: number, message?: string) => void,
+): Promise<FrequencyBundleResult> {
   const form = new FormData();
   form.append("file", file);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180_000);
 
   let response: Response;
   try {
     response = await fetch(`${API_URL}/extract/frequencia`, {
       method: "POST",
       body: form,
-      signal: controller.signal,
     });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new ApiError("A requisicao excedeu o tempo limite (180s).", 408);
-    }
+  } catch {
     throw new ApiError("Nao foi possivel conectar ao servidor.", 0);
-  } finally {
-    clearTimeout(timeout);
   }
 
   if (!response.ok) {
@@ -342,14 +336,49 @@ export async function extractFrequencia(file: File): Promise<FrequencyBundleResu
     );
   }
 
-  const data = await response.json();
-  return {
-    excelBlob: b64ToBlob(
-      data.excel_b64,
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ),
-    excelFilename: data.excel_filename,
-    rowCount: data.rows_extracted ?? 0,
-    provider: data.provider ?? "pdfplumber",
-  };
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop()!;
+
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (!trimmed || trimmed.startsWith(":")) continue;
+
+      const dataLine = trimmed.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(dataLine.slice(6));
+      } catch {
+        continue;
+      }
+
+      if (event.type === "progress") {
+        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+      } else if (event.type === "done") {
+        return {
+          excelBlob: b64ToBlob(
+            event.excel_b64 as string,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          ),
+          excelFilename: event.excel_filename as string,
+          rowCount: (event.rows_extracted as number) ?? 0,
+          provider: (event.provider as string) ?? "pdfplumber",
+        };
+      } else if (event.type === "error") {
+        throw new ApiError((event.message as string) ?? "Erro ao processar frequencia.", 422);
+      }
+    }
+  }
+
+  throw new ApiError("Processamento interrompido inesperadamente.", 500);
 }

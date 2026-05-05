@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import logging
 import re
@@ -129,7 +130,11 @@ def extract_frequency_days_pdfplumber(pdf_bytes: bytes) -> list[FrequencyDay]:
 
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
+            try:
+                text = page.extract_text() or ""
+            finally:
+                page.close()
+
             period_match = PERIOD_RE.search(text)
             if period_match:
                 current_year = int(period_match.group("year"))
@@ -331,3 +336,73 @@ async def extract_and_classify_frequency_cycles(
         )
 
     return classify_frequency_days(rows), provider
+
+
+async def stream_frequency_cycle_extraction(
+    pdf_bytes: bytes,
+    original_stem: str,
+):
+    from services.frequency_cycle_excel_builder import build_frequency_cycle_excel
+
+    try:
+        yield "data: " + json.dumps({
+            "type": "progress",
+            "chunk": 0,
+            "total": 1,
+            "step": "pdfplumber",
+            "message": "Analisando relatorio de frequencia com pdfplumber...",
+        }) + "\n\n"
+
+        task = asyncio.create_task(asyncio.to_thread(extract_frequency_days_pdfplumber, pdf_bytes))
+        while not task.done():
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(10)
+
+        rows = task.result()
+        provider = "pdfplumber"
+
+        if not rows:
+            provider = "gemini"
+            yield "data: " + json.dumps({
+                "type": "progress",
+                "chunk": 1,
+                "total": 1,
+                "step": "gemini",
+                "message": "pdfplumber nao encontrou linhas diarias. Tentando Gemini...",
+            }) + "\n\n"
+
+            gemini_task = asyncio.create_task(extract_frequency_days_gemini(pdf_bytes))
+            while not gemini_task.done():
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(10)
+            rows = gemini_task.result()
+
+        if not rows:
+            yield "data: " + json.dumps({
+                "type": "error",
+                "message": "Nenhuma linha diaria de frequencia encontrada no PDF.",
+            }) + "\n\n"
+            return
+
+        classified = classify_frequency_days(rows)
+        excel_bytes = await asyncio.to_thread(
+            build_frequency_cycle_excel,
+            classified,
+            provider,
+        )
+
+        yield "data: " + json.dumps({
+            "type": "done",
+            "excel_b64": base64.b64encode(excel_bytes).decode(),
+            "excel_filename": f"frequencia_{original_stem}.xlsx",
+            "rows_extracted": len(classified),
+            "provider": provider,
+            "pdf_type": "native" if provider == "pdfplumber" else "scanned",
+        }, ensure_ascii=False) + "\n\n"
+
+    except Exception as e:
+        logger.exception("frequency cycle stream: unexpected error: %s", e)
+        yield "data: " + json.dumps({
+            "type": "error",
+            "message": "Erro interno ao processar relatorio de frequencia.",
+        }) + "\n\n"

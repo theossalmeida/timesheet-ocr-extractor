@@ -52,7 +52,12 @@ export function useExtraction(): ExtractionHook {
 
       let interval: ReturnType<typeof setInterval> | undefined;
 
-      if (mode !== "guia" && mode !== "contracheque" && mode !== "horas_extras") {
+      if (
+        mode !== "guia" &&
+        mode !== "contracheque" &&
+        mode !== "horas_extras" &&
+        mode !== "frequencia"
+      ) {
         const stages: Array<[number, string]> = [
           [10, "Enviando arquivo..."],
           [20, "Arquivo recebido. Analisando PDF..."],
@@ -113,7 +118,7 @@ export function useExtraction(): ExtractionHook {
             error: null,
           });
         } else if (mode === "frequencia") {
-          const result = await extractFrequencia(file);
+          const result = await extractFrequencia(file, handleChunkProgress);
           clearInterval(interval);
 
           setProgress(95, "Quase pronto...");

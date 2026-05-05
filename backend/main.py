@@ -17,10 +17,8 @@ from services.contracheque_extra_hours_service import (
     stream_contracheque_extra_hours_extraction,
 )
 from services.contracheque_service import stream_contracheque_extraction
-from services.frequency_cycle_excel_builder import build_frequency_cycle_excel
 from services.frequency_cycle_service import (
-    FrequencyCycleExtractionError,
-    extract_and_classify_frequency_cycles,
+    stream_frequency_cycle_extraction,
 )
 from services.guia_ministerial_service import stream_guia_extraction
 from services.gemini_service import GeminiExtractionError, extract_with_gemini
@@ -235,30 +233,15 @@ async def extract_frequencia(request: Request, file: UploadFile = File(...)):
     )
     _validate_pdf(pdf_bytes, len(pdf_bytes), max_mb=200)
 
-    try:
-        rows, provider = await extract_and_classify_frequency_cycles(pdf_bytes)
-    except FrequencyCycleExtractionError as e:
-        logger.error("Frequency extraction failed: %s", e)
-        raise HTTPException(
-            status_code=422,
-            detail="Nao foi possivel classificar este relatorio de frequencia.",
-        ) from e
-
-    excel_bytes = build_frequency_cycle_excel(rows, provider)
     original_stem = (file.filename or "frequencia").removesuffix(".pdf").removesuffix(".PDF")
 
-    return JSONResponse(
-        content={
-            "excel_b64": base64.b64encode(excel_bytes).decode(),
-            "excel_filename": f"frequencia_{original_stem}.xlsx",
-            "rows_extracted": len(rows),
-            "provider": provider,
-            "pdf_type": "native" if provider == "pdfplumber" else "scanned",
-        },
+    return StreamingResponse(
+        stream_frequency_cycle_extraction(pdf_bytes, original_stem),
+        media_type="text/event-stream",
         headers={
-            "X-Provider-Used": provider,
-            "X-Rows-Extracted": str(len(rows)),
-            "X-PDF-Type": "native" if provider == "pdfplumber" else "scanned",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 
