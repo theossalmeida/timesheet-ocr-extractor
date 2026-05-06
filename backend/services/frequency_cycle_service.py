@@ -35,7 +35,7 @@ Regras:
 
 DATE_ROW_RE = re.compile(
     r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
-    r"(?P<scale>FOLG|HS\d+)\b(?P<details>.*)Sobreaviso$"
+    r"(?P<scale>FOLG|HS\d+|HT\d+)\b(?P<details>.*)(?:Sobreaviso|Turno de \d+ Horas)$"
 )
 PERIOD_RE = re.compile(r"Per.odo\s+\d{2}/\d{2}/(?P<year>\d{4})")
 TIME_RE = re.compile(r"\b\d{2}:\d{2}\b")
@@ -305,7 +305,7 @@ async def extract_frequency_days_gemini(pdf_bytes: bytes) -> list[FrequencyDay]:
     for index, item in enumerate(data.get("dias") or [], start=1):
         row_date = parse_excel_date(item.get("data"))
         scale = str(item.get("escala") or "").strip().upper()
-        if row_date is None or not re.match(r"^(FOLG|HS\d+)$", scale):
+        if row_date is None or not re.match(r"^(FOLG|HS\d+|HT\d+)$", scale):
             continue
         rows.append(
             FrequencyDay(
