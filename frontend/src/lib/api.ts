@@ -340,43 +340,74 @@ export async function extractFrequencia(
   const decoder = new TextDecoder();
   let buffer = "";
 
+  const parseEvent = (part: string): Record<string, unknown> | null => {
+    const trimmed = part.trim();
+    if (!trimmed || trimmed.startsWith(":")) return null;
+
+    const dataLines = trimmed
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => line.slice(6));
+
+    const payload = dataLines.length > 0 ? dataLines.join("\n") : trimmed;
+    if (!payload.startsWith("{")) return null;
+
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  };
+
+  const handleEvent = (event: Record<string, unknown>): FrequencyBundleResult | null => {
+    if (event.type === "progress") {
+      onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+      return null;
+    }
+
+    if (event.type === "done") {
+      return {
+        excelBlob: b64ToBlob(
+          event.excel_b64 as string,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        excelFilename: event.excel_filename as string,
+        rowCount: (event.rows_extracted as number) ?? 0,
+        provider: (event.provider as string) ?? "pdfplumber",
+      };
+    }
+
+    if (event.type === "error") {
+      throw new ApiError((event.message as string) ?? "Erro ao processar frequencia.", 422);
+    }
+
+    return null;
+  };
+
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const event = parseEvent(buffer);
+        if (event) {
+          const result = handleEvent(event);
+          if (result) return result;
+        }
+      }
+      break;
+    }
 
     buffer += decoder.decode(value, { stream: true });
     const parts = buffer.split("\n\n");
     buffer = parts.pop()!;
 
     for (const part of parts) {
-      const trimmed = part.trim();
-      if (!trimmed || trimmed.startsWith(":")) continue;
+      const event = parseEvent(part);
+      if (!event) continue;
 
-      const dataLine = trimmed.split("\n").find((l) => l.startsWith("data: "));
-      if (!dataLine) continue;
-
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(dataLine.slice(6));
-      } catch {
-        continue;
-      }
-
-      if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
-      } else if (event.type === "done") {
-        return {
-          excelBlob: b64ToBlob(
-            event.excel_b64 as string,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          ),
-          excelFilename: event.excel_filename as string,
-          rowCount: (event.rows_extracted as number) ?? 0,
-          provider: (event.provider as string) ?? "pdfplumber",
-        };
-      } else if (event.type === "error") {
-        throw new ApiError((event.message as string) ?? "Erro ao processar frequencia.", 422);
-      }
+      const result = handleEvent(event);
+      if (result) return result;
     }
   }
 
