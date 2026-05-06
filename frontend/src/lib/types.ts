@@ -29,7 +29,12 @@ export interface ExtractionResult {
   total_rows: number;
 }
 
-export type ExtractionMode = "cartao" | "guia" | "contracheque" | "horas_extras";
+export type ExtractionMode =
+  | "cartao"
+  | "guia"
+  | "contracheque"
+  | "horas_extras"
+  | "frequencia";
 
 export type ExtractionStatus =
   | "idle"

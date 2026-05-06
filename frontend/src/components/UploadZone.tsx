@@ -16,7 +16,7 @@ const MAX_SIZE_GUIA = 200 * 1024 * 1024;
 
 export function UploadZone({ onFile, status, mode }: UploadZoneProps) {
   const maxSize =
-    mode === "guia" || mode === "contracheque" || mode === "horas_extras"
+    mode === "guia" || mode === "contracheque" || mode === "horas_extras" || mode === "frequencia"
       ? MAX_SIZE_GUIA
       : MAX_SIZE_CARTAO;
 

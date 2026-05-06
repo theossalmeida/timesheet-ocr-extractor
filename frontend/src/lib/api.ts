@@ -29,6 +29,13 @@ export interface ExtraHoursBundleResult extends ContrachequeBundleResult {
   columnsExtracted: number;
 }
 
+export interface FrequencyBundleResult {
+  excelBlob: Blob;
+  excelFilename: string;
+  rowCount: number;
+  provider: string;
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 function b64ToBlob(b64: string, mimeType: string): Blob {
@@ -299,6 +306,108 @@ export async function extractContrachequeExtraHours(
       } else if (event.type === "error") {
         throw new ApiError((event.message as string) ?? "Erro ao processar horas extras.", 422);
       }
+    }
+  }
+
+  throw new ApiError("Processamento interrompido inesperadamente.", 500);
+}
+
+export async function extractFrequencia(
+  file: File,
+  onProgress?: (chunk: number, total: number, message?: string) => void,
+): Promise<FrequencyBundleResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/extract/frequencia`, {
+      method: "POST",
+      body: form,
+    });
+  } catch {
+    throw new ApiError("Nao foi possivel conectar ao servidor.", 0);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(
+      await _parseError(response, "Erro ao processar o relatorio de frequencia."),
+      response.status,
+    );
+  }
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseEvent = (part: string): Record<string, unknown> | null => {
+    const trimmed = part.trim();
+    if (!trimmed || trimmed.startsWith(":")) return null;
+
+    const dataLines = trimmed
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => line.slice(6));
+
+    const payload = dataLines.length > 0 ? dataLines.join("\n") : trimmed;
+    if (!payload.startsWith("{")) return null;
+
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  };
+
+  const handleEvent = (event: Record<string, unknown>): FrequencyBundleResult | null => {
+    if (event.type === "progress") {
+      onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+      return null;
+    }
+
+    if (event.type === "done") {
+      return {
+        excelBlob: b64ToBlob(
+          event.excel_b64 as string,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        excelFilename: event.excel_filename as string,
+        rowCount: (event.rows_extracted as number) ?? 0,
+        provider: (event.provider as string) ?? "pdfplumber",
+      };
+    }
+
+    if (event.type === "error") {
+      throw new ApiError((event.message as string) ?? "Erro ao processar frequencia.", 422);
+    }
+
+    return null;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const event = parseEvent(buffer);
+        if (event) {
+          const result = handleEvent(event);
+          if (result) return result;
+        }
+      }
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop()!;
+
+    for (const part of parts) {
+      const event = parseEvent(part);
+      if (!event) continue;
+
+      const result = handleEvent(event);
+      if (result) return result;
     }
   }
 

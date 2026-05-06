@@ -139,3 +139,21 @@ def test_contracheque_extra_hours_stream_route():
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
     assert '"type":"done"' in r.text
+
+
+def test_extract_frequencia_success_returns_excel_bundle():
+    async def fake_stream(pdf_bytes: bytes, original_stem: str):
+        yield 'data: {"type":"done","excel_b64":"UEtmYWtl","excel_filename":"frequencia_frequencia.xlsx","rows_extracted":1,"provider":"pdfplumber"}\n\n'
+
+    with patch("main.stream_frequency_cycle_extraction", fake_stream):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post(
+            "/extract/frequencia",
+            files={"file": ("frequencia.pdf", data, "application/pdf")},
+        )
+
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    assert '"excel_filename":"frequencia_frequencia.xlsx"' in r.text
+    assert '"rows_extracted":1' in r.text
+    assert '"provider":"pdfplumber"' in r.text

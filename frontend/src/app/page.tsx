@@ -13,6 +13,7 @@ const MODE_DESCRIPTIONS: Record<ExtractionMode, string> = {
   guia: "Faca upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
   contracheque: "Faca upload do PDF de contracheques da Petrobras e baixe a ficha salarial em Excel organizada por ano e mes.",
   horas_extras: "Faca upload do PDF de contracheques da Petrobras e baixe uma planilha mensal apenas com verbas de horas extras.",
+  frequencia: "Faca upload do relatorio de frequencia da Petrobras e baixe a classificacao diaria de ciclos.",
 };
 
 export default function Home() {
