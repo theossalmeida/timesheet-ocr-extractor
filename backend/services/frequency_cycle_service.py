@@ -29,6 +29,8 @@ Retorne JSON no formato:
 
 Regras:
 - Inclua todas as datas da tabela diaria.
+- Em relatorios com "Periodo : DD.MM.YYYY a DD.MM.YYYY" e linhas iniciadas
+  apenas por dia, monte a data completa usando mes/ano do periodo.
 - Preserve marcadores como 08:00, 12:00, 1082, 2025, 2040 e **** dentro de detalhes.
 - Ignore secoes de rubricas, ajustes e resumos.
 - Retorne somente JSON, sem markdown."""
@@ -37,7 +39,16 @@ DATE_ROW_RE = re.compile(
     r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
     r"(?P<scale>FOLG|HS\d+|HT\d+)\b(?P<details>.*)(?:Sobreaviso|Turno de \d+ Horas)$"
 )
-PERIOD_RE = re.compile(r"Per.odo\s+\d{2}/\d{2}/(?P<year>\d{4})")
+DAY_ONLY_ROW_RE = re.compile(
+    r"^(?P<day>\d{2})\s+\S+\s+"
+    r"(?P<scale>FOLG|HS\d+|HT\d+)\b(?P<details>.*)$",
+    re.IGNORECASE,
+)
+PERIOD_RE = re.compile(
+    r"Per[i\u00ed]odo\s*:?\s*"
+    r"\d{2}[./](?P<month>\d{2})[./](?P<year>\d{4})",
+    re.IGNORECASE,
+)
 TIME_RE = re.compile(r"\b\d{2}:\d{2}\b")
 
 EMBARKED_START = "EMBARCADO - In\u00edcio do ciclo"
@@ -127,6 +138,7 @@ def has_work_on_day_off_marker(details: str) -> bool:
 def extract_frequency_days_pdfplumber(pdf_bytes: bytes) -> list[FrequencyDay]:
     rows: list[FrequencyDay] = []
     current_year: int | None = None
+    current_month: int | None = None
 
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
@@ -138,23 +150,51 @@ def extract_frequency_days_pdfplumber(pdf_bytes: bytes) -> list[FrequencyDay]:
             period_match = PERIOD_RE.search(text)
             if period_match:
                 current_year = int(period_match.group("year"))
+                current_month = int(period_match.group("month"))
 
             for line in text.splitlines():
-                match = DATE_ROW_RE.match(line.strip())
-                if not match or current_year is None:
+                stripped = line.strip()
+                match = DATE_ROW_RE.match(stripped)
+                if match and current_year is not None:
+                    row_date = date(
+                        current_year,
+                        int(match.group("month")),
+                        int(match.group("day")),
+                    )
+                    rows.append(
+                        FrequencyDay(
+                            date=row_date,
+                            scale=match.group("scale"),
+                            details=match.group("details").strip(),
+                            pdf_line=stripped,
+                            page=page_index,
+                        )
+                    )
                     continue
 
-                row_date = date(
-                    current_year,
-                    int(match.group("month")),
-                    int(match.group("day")),
-                )
+                match = DAY_ONLY_ROW_RE.match(stripped)
+                if (
+                    not match
+                    or current_year is None
+                    or current_month is None
+                ):
+                    continue
+
+                try:
+                    row_date = date(
+                        current_year,
+                        current_month,
+                        int(match.group("day")),
+                    )
+                except ValueError:
+                    continue
+
                 rows.append(
                     FrequencyDay(
                         date=row_date,
                         scale=match.group("scale"),
                         details=match.group("details").strip(),
-                        pdf_line=line.strip(),
+                        pdf_line=stripped,
                         page=page_index,
                     )
                 )
