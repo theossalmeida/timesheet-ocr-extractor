@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -13,7 +14,11 @@ from services.frequency_cycle_service import (
     WORK_ON_DAY_OFF,
     FrequencyDay,
     classify_frequency_days,
+    extract_frequency_days_hybrid,
+    extract_frequency_days_gemini_adaptive,
     extract_frequency_days_pdfplumber,
+    merge_frequency_days,
+    FrequencyCycleExtractionError,
 )
 
 
@@ -90,6 +95,115 @@ def test_extracts_day_only_frequency_rows_from_new_petrobras_format():
     classified = classify_frequency_days(result)
     assert classified[1].situation == WORK_ON_DAY_OFF
     assert classified[2].situation == DAY_OFF
+
+
+def test_merge_frequency_days_prefers_pdfplumber_for_duplicate_dates():
+    pdfplumber_rows = [
+        FrequencyDay(date(2026, 3, 1), "FOLG", "-1,00", "pdfplumber", 125),
+    ]
+    gemini_rows = [
+        FrequencyDay(date(2026, 2, 28), "HS02", "+1,50", "gemini", 10),
+        FrequencyDay(date(2026, 3, 1), "HS02", "duplicate", "gemini", 11),
+    ]
+
+    result = merge_frequency_days(pdfplumber_rows, gemini_rows)
+
+    assert [row.date for row in result] == [date(2026, 2, 28), date(2026, 3, 1)]
+    assert result[1].scale == "FOLG"
+    assert result[1].pdf_line == "pdfplumber"
+
+
+def test_hybrid_extraction_calls_gemini_for_image_only_pages():
+    pdfplumber_rows = [
+        FrequencyDay(date(2026, 3, 1), "FOLG", "-1,00", "pdfplumber", 125),
+    ]
+    gemini_rows = [
+        FrequencyDay(date(2026, 1, 1), "HS02", "+1,50", "gemini", 1),
+    ]
+
+    with (
+        patch(
+            "services.frequency_cycle_service._extract_frequency_days_and_gemini_chunks",
+            return_value=(pdfplumber_rows, [b"image-pages"]),
+        ),
+        patch(
+            "services.frequency_cycle_service.extract_frequency_days_gemini_adaptive",
+            AsyncMock(return_value=gemini_rows),
+        ) as gemini_mock,
+    ):
+        rows, provider = asyncio.run(extract_frequency_days_hybrid(b"full-pdf"))
+
+    gemini_mock.assert_awaited_once_with(b"image-pages")
+    assert provider == "pdfplumber+gemini"
+    assert [row.date for row in rows] == [date(2026, 1, 1), date(2026, 3, 1)]
+
+
+def test_hybrid_extraction_skips_gemini_when_pdfplumber_is_complete():
+    pdfplumber_rows = [
+        FrequencyDay(date(2026, 3, 1), "FOLG", "-1,00", "pdfplumber", 125),
+    ]
+
+    with (
+        patch(
+            "services.frequency_cycle_service._extract_frequency_days_and_gemini_chunks",
+            return_value=(pdfplumber_rows, []),
+        ),
+        patch(
+            "services.frequency_cycle_service.extract_frequency_days_gemini_adaptive",
+            AsyncMock(),
+        ) as gemini_mock,
+    ):
+        rows, provider = asyncio.run(extract_frequency_days_hybrid(b"full-pdf"))
+
+    gemini_mock.assert_not_awaited()
+    assert provider == "pdfplumber"
+    assert rows == pdfplumber_rows
+
+
+def test_hybrid_extraction_skips_failed_gemini_chunk():
+    pdfplumber_rows = [
+        FrequencyDay(date(2026, 3, 1), "FOLG", "-1,00", "pdfplumber", 125),
+    ]
+
+    with (
+        patch(
+            "services.frequency_cycle_service._extract_frequency_days_and_gemini_chunks",
+            return_value=(pdfplumber_rows, [b"slow-image-pages"]),
+        ),
+        patch(
+            "services.frequency_cycle_service.extract_frequency_days_gemini_adaptive",
+            AsyncMock(side_effect=FrequencyCycleExtractionError("timeout")),
+        ),
+    ):
+        rows, provider = asyncio.run(extract_frequency_days_hybrid(b"full-pdf"))
+
+    assert provider == "pdfplumber"
+    assert rows == pdfplumber_rows
+
+
+def test_gemini_adaptive_splits_failed_multi_page_chunk():
+    gemini_rows = [
+        FrequencyDay(date(2026, 1, 1), "HS02", "+1,50", "gemini", 1),
+    ]
+
+    with (
+        patch(
+            "services.frequency_cycle_service.extract_frequency_days_gemini",
+            AsyncMock(side_effect=[
+                FrequencyCycleExtractionError("timeout"),
+                gemini_rows,
+                [],
+            ]),
+        ) as gemini_mock,
+        patch(
+            "services.frequency_cycle_service._split_pdf_into_page_chunks",
+            return_value=[b"page-1", b"page-2"],
+        ),
+    ):
+        rows = asyncio.run(extract_frequency_days_gemini_adaptive(b"multi-page"))
+
+    assert rows == gemini_rows
+    assert gemini_mock.await_count == 3
 
 
 def test_classifies_embarked_cycle_start_and_following_days():
