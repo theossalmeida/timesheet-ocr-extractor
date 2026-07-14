@@ -21,7 +21,11 @@ from services.frequency_cycle_service import (
     stream_frequency_cycle_extraction,
 )
 from services.guia_ministerial_service import stream_guia_extraction
-from services.gemini_service import GeminiExtractionError, extract_with_gemini
+from services.gemini_service import (
+    GeminiExtractionError,
+    extract_with_gemini,
+    extract_with_gemini_adaptive,
+)
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from utils.validators import validate_result, validate_row
@@ -96,31 +100,35 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     pdf_type = detect_pdf_type(pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
 
-    rows = None
     provider = "pdfplumber"
 
-    if pdf_type == "native":
-        rows = extract_with_pdfplumber(pdf_bytes)
-        if rows:
-            # Check for scanned pages mixed into the same PDF (e.g. digital-signature wrappers
-            # around image-only timesheets after the native-text section).
-            scanned_bytes = get_scanned_page_bytes(pdf_bytes)
-            if scanned_bytes:
-                pdf_type = "mixed"
-                logger.info("Hybrid PDF: found scanned pages — running Gemini OCR")
-                try:
-                    extra_rows = await extract_with_gemini(scanned_bytes)
-                    if extra_rows:
-                        provider = "pdfplumber+gemini"
-                        rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                        logger.info("Hybrid merge — total rows=%d", len(rows))
-                except GeminiExtractionError as e:
-                    logger.warning("Gemini failed on scanned pages: %s", e)
+    # Always attempt local extraction first — detect_pdf_type is only a hint and
+    # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
+    # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
+    # Gemini must remain the last resort, so it is only reached when pdfplumber yields nothing.
+    rows = extract_with_pdfplumber(pdf_bytes)
 
-    if rows is None:
+    if rows:
+        # Check for scanned pages mixed into the same PDF (e.g. digital-signature wrappers
+        # around image-only timesheets after the native-text section).
+        scanned_bytes = get_scanned_page_bytes(pdf_bytes)
+        if scanned_bytes:
+            pdf_type = "mixed"
+            logger.info("Hybrid PDF: found scanned pages — running Gemini OCR")
+            try:
+                extra_rows = await extract_with_gemini(scanned_bytes)
+                if extra_rows:
+                    provider = "pdfplumber+gemini"
+                    rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                    logger.info("Hybrid merge — total rows=%d", len(rows))
+            except GeminiExtractionError as e:
+                logger.warning("Gemini failed on scanned pages: %s", e)
+
+    if not rows:
         provider = "gemini"
+        gemini_bytes = get_scanned_page_bytes(pdf_bytes) or pdf_bytes
         try:
-            rows = await extract_with_gemini(pdf_bytes)
+            rows = await extract_with_gemini_adaptive(gemini_bytes)
         except GeminiExtractionError as e:
             logger.error("Gemini failed: %s", e)
             raise HTTPException(

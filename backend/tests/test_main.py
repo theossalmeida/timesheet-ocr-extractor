@@ -65,11 +65,32 @@ def test_extract_success_returns_bundle():
     assert r.headers["x-pdf-type"] == "native"
 
 
+def test_extract_uses_pdfplumber_even_when_type_not_native():
+    """detect_pdf_type is only a hint; pdfplumber must run for every type and
+    Gemini must never be invoked when pdfplumber already extracted rows."""
+    gemini_mock = AsyncMock(return_value=[])
+    for detected_type in ("mixed", "scanned"):
+        with patch("main.detect_pdf_type", return_value=detected_type), \
+             patch("main.extract_with_pdfplumber", return_value=SAMPLE_ROWS), \
+             patch("main.get_scanned_page_bytes", return_value=None), \
+             patch("main.extract_with_gemini", gemini_mock), \
+             patch("main.extract_with_gemini_adaptive", gemini_mock), \
+             patch("main.build_excel", return_value=b"PKfake"):
+            data = io.BytesIO(MINIMAL_PDF)
+            r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
+
+        assert r.status_code == 200
+        assert r.headers["x-provider-used"] == "pdfplumber"
+        assert r.json()["rows_extracted"] == 2
+    gemini_mock.assert_not_awaited()
+
+
 def test_extract_fallback_to_gemini():
     gemini_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
-         patch("main.extract_with_gemini", AsyncMock(return_value=gemini_rows)), \
+         patch("main.get_scanned_page_bytes", return_value=None), \
+         patch("main.extract_with_gemini_adaptive", AsyncMock(return_value=gemini_rows)), \
          patch("main.build_excel", return_value=b"PKfake"):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
@@ -78,28 +99,27 @@ def test_extract_fallback_to_gemini():
     assert r.headers["x-provider-used"] == "gemini"
 
 
-def test_extract_fallback_to_mistral():
-    from services.gemini_service import GeminiExtractionError
-    mistral_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
-    with patch("main.detect_pdf_type", return_value="scanned"), \
+def test_extract_fallback_sends_scanned_pages_to_gemini():
+    gemini_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    gemini_mock = AsyncMock(return_value=gemini_rows)
+    with patch("main.detect_pdf_type", return_value="native"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
-         patch("main.extract_with_gemini", AsyncMock(side_effect=GeminiExtractionError("fail"))), \
-         patch("main.extract_with_mistral", AsyncMock(return_value=mistral_rows)), \
+         patch("main.get_scanned_page_bytes", return_value=b"scanned-pages"), \
+         patch("main.extract_with_gemini_adaptive", gemini_mock), \
          patch("main.build_excel", return_value=b"PKfake"):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
     assert r.status_code == 200
-    assert r.headers["x-provider-used"] == "mistral"
+    gemini_mock.assert_awaited_once_with(b"scanned-pages")
 
 
-def test_extract_all_providers_fail_returns_422():
+def test_extract_gemini_fail_returns_422():
     from services.gemini_service import GeminiExtractionError
-    from services.mistral_service import MistralExtractionError
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
-         patch("main.extract_with_gemini", AsyncMock(side_effect=GeminiExtractionError("fail"))), \
-         patch("main.extract_with_mistral", AsyncMock(side_effect=MistralExtractionError("fail"))):
+         patch("main.get_scanned_page_bytes", return_value=None), \
+         patch("main.extract_with_gemini_adaptive", AsyncMock(side_effect=GeminiExtractionError("fail"))):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
