@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import openpyxl
 
@@ -83,7 +83,7 @@ def test_extra_hours_excel_has_dynamic_columns_blanks_and_total_formula():
     assert ws.cell(row=3, column=4).value == "=SUM(B3:C3)"
 
 
-def test_stream_skips_failed_pages_when_gemini_is_not_needed():
+def test_stream_skips_failed_pages_when_ocr_is_not_needed():
     page = {
         "competencia": "04/2021",
         "itens": [{"descricao": "Hora Extra Interjornada", "valor": 498.79}],
@@ -105,13 +105,13 @@ def test_stream_skips_failed_pages_when_gemini_is_not_needed():
             return_value=([page], [1]),
         ),
         patch(
-            "services.contracheque_extra_hours_service._failed_pages_that_need_gemini",
+            "services.contracheque_extra_hours_service._failed_pages_that_need_ocr",
             return_value=[],
         ),
         patch(
-            "services.contracheque_extra_hours_service._process_chunk_gemini",
-            AsyncMock(),
-        ) as gemini_mock,
+            "services.contracheque_extra_hours_service._process_chunk_tesseract",
+            MagicMock(),
+        ) as tesseract_mock,
         patch(
             "services.contracheque_extra_hours_service.pypdf.PdfReader",
             return_value=MagicMock(pages=[object()]),
@@ -120,4 +120,4 @@ def test_stream_skips_failed_pages_when_gemini_is_not_needed():
         result = asyncio.run(consume())
 
     assert result["provider"] == "pdfplumber"
-    gemini_mock.assert_not_called()
+    tesseract_mock.assert_not_called()

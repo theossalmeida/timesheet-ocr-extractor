@@ -14,7 +14,7 @@ from services.contracheque_service import (
     CHUNK_SIZE,
     _extract_all_pdfplumber,
     _make_chunks,
-    _process_chunk_gemini,
+    _process_chunk_tesseract,
     _split_pages_by_index,
 )
 from services.contracheque_extra_hours_excel_builder import (
@@ -81,7 +81,7 @@ def aggregate_extra_hours(
     return extra_hours_data, columns
 
 
-def _failed_pages_that_need_gemini(pdf_bytes: bytes, failed_indices: list[int]) -> list[int]:
+def _failed_pages_that_need_ocr(pdf_bytes: bytes, failed_indices: list[int]) -> list[int]:
     indices: list[int] = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -100,7 +100,7 @@ def _failed_pages_that_need_gemini(pdf_bytes: bytes, failed_indices: list[int]) 
                 indices.append(idx)
             else:
                 logger.info(
-                    "contracheque extra-hours: skipping Gemini for page %d; no extra-hour item section found",
+                    "contracheque extra-hours: skipping OCR for page %d; no extra-hour item section found",
                     idx,
                 )
 
@@ -129,38 +129,36 @@ async def stream_contracheque_extra_hours_extraction(
             pdf_bytes,
         )
         all_pages: list[dict] = list(plumber_results)
-        gemini_indices = _failed_pages_that_need_gemini(pdf_bytes, failed_indices)
+        ocr_indices = _failed_pages_that_need_ocr(pdf_bytes, failed_indices)
+        ocr_found_rows = False
 
-        if gemini_indices:
+        if ocr_indices:
             logger.info(
-                "contracheque extra-hours: sending %d page(s) to Gemini",
-                len(gemini_indices),
+                "contracheque extra-hours: sending %d page(s) to local OCR",
+                len(ocr_indices),
             )
-            failed_page_bytes = _split_pages_by_index(pdf_bytes, gemini_indices)
-            gemini_chunks = _make_chunks(failed_page_bytes, chunk_size)
-            total_chunks = len(gemini_chunks)
+            failed_page_bytes = _split_pages_by_index(pdf_bytes, ocr_indices)
+            ocr_chunks = _make_chunks(failed_page_bytes, chunk_size)
+            total_chunks = len(ocr_chunks)
 
-            for i, chunk in enumerate(gemini_chunks):
+            for i, chunk in enumerate(ocr_chunks):
                 yield "data: " + json.dumps({
                     "type": "progress",
                     "chunk": i + 1,
                     "total": total_chunks,
-                    "step": "gemini",
-                    "message": f"Gemini: processando parte {i + 1} de {total_chunks}...",
+                    "step": "tesseract",
+                    "message": f"OCR local (Tesseract): processando parte {i + 1} de {total_chunks}...",
                 }) + "\n\n"
 
-                task = asyncio.create_task(_process_chunk_gemini(chunk))
+                task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
                 while not task.done():
                     yield ": keep-alive\n\n"
                     await asyncio.sleep(15)
 
-                exc = task.exception()
-                if exc is not None:
-                    logger.error("contracheque extra-hours: Gemini chunk failed: %s", exc)
-                    yield "data: " + json.dumps({"type": "error", "message": str(exc)}) + "\n\n"
-                    return
-
-                all_pages.extend(task.result())
+                chunk_pages = task.result()
+                if chunk_pages:
+                    ocr_found_rows = True
+                all_pages.extend(chunk_pages)
         else:
             yield "data: " + json.dumps({
                 "type": "progress",
@@ -180,8 +178,10 @@ async def stream_contracheque_extra_hours_extraction(
 
         provider = (
             "pdfplumber"
-            if not gemini_indices
-            else ("pdfplumber+gemini" if plumber_results else "gemini")
+            if not ocr_indices
+            else ("pdfplumber+tesseract" if plumber_results and ocr_found_rows else (
+                "tesseract" if ocr_found_rows else "pdfplumber"
+            ))
         )
         excel_bytes = build_contracheque_extra_hours_excel(extra_hours_data, columns)
 

@@ -1,45 +1,36 @@
 from __future__ import annotations
 import asyncio
-import base64
 import io
 import json
 import logging
 import re
 
-import httpx
 import pypdf
 
 logger = logging.getLogger(__name__)
 
-from config import settings
 from models.timesheet import TimesheetRow
 from utils.normalizers import normalize_date, normalize_time
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent"
+CHUNK_SIZE = 20  # pages per local-OCR request (keeps progress updates granular)
 
-CHUNK_SIZE = 20  # pages per Gemini request
-
-GUIA_PROMPT = """Você está extraindo registros de ponto de documentos trabalhistas brasileiros (Guia Ministerial / Papeleta de Serviço Externo).
-
-Para CADA registro diário encontrado, extraia:
-- "data": a data no formato DD/MM/YYYY
-- "entrada": o horário de entrada no formato HH:MM
-  (procure por rótulos como: hora entrada, hora início, hora começo, entrada, início, saída da garagem)
-- "saida": o horário de saída no formato HH:MM
-  (procure por rótulos como: hora saída, hora término, hora fim, saída, término, chegada à garagem)
-
-Regras:
-- Use SEMPRE o horário MAIS CEDO encontrado como "entrada" e o MAIS TARDE como "saida" para cada data — mesmo que haja múltiplas linhas ou turnos no mesmo dia
-- Horários podem estar escritos como HHMM (ex: "1350" → "13:50"), HH:MM ou H:MM — retorne sempre HH:MM
-- Datas podem estar em DD/MM/AA ou DD/MM/AAAA — retorne sempre DD/MM/AAAA (anos com 2 dígitos = 20XX)
-- Se um horário ou data estiver ilegível ou ausente, use null
-- Retorne array vazio se nenhum registro válido for encontrado
-
-Retorne APENAS JSON válido com a chave "records":
-{"records": [{"data": "25/01/2024", "entrada": "06:30", "saida": "14:50"}]}"""
-
-_MAX_RETRIES = 3
-_DEFAULT_WAIT = 15
+# Guia Ministerial / Papeleta de Serviço Externo documents use loose,
+# inconsistent field labels for entrada/saída (e.g. "hora entrada", "hora
+# início", "saída da garagem"). Without a vision-capable model to read those
+# labels semantically, the local OCR path instead falls back to a simpler
+# (and more limited) heuristic: for every date found on a line, take every
+# HH:MM-shaped time on that same line and use the earliest as entrada and the
+# latest as saída — mirroring the old "always earliest=entrada, latest=saida"
+# aggregation rule, just without label awareness.
+#
+# IMPORTANT LIMITATION: many real Guia Ministerial forms are filled out by
+# hand. Tesseract is a printed-text OCR engine and does not reliably read
+# handwriting — this path works reasonably well for typed/printed guias, but
+# will likely miss or misread handwritten ones. There is no local, free
+# equivalent to a handwriting-capable vision model; this trade-off should be
+# revisited if handwritten guias are common in practice.
+_DATE_TOKEN_RE = re.compile(r"\b(\d{2})[/\-.](\d{2})[/\-.](\d{2,4})\b")
+_TIME_TOKEN_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 
 
 class GuiaExtractionError(Exception):
@@ -60,27 +51,70 @@ def _split_pdf_chunks(pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE) -> list[by
     return chunks
 
 
-def _clean_json(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+def _extract_records_from_text(text: str) -> list[dict]:
+    """Find "DD/MM/YYYY ... HH:MM ... HH:MM" style lines in OCR'd text and
+    turn each into a raw {"data", "entrada", "saida"} record (earliest time
+    on the line = entrada, latest = saida).
+    """
+    records: list[dict] = []
+    for line in text.splitlines():
+        date_match = _DATE_TOKEN_RE.search(line)
+        if not date_match:
+            continue
+        dd, mm, yy = date_match.groups()
+        year = f"20{yy}" if len(yy) == 2 else yy
+        data_str = f"{dd}/{mm}/{year}"
+
+        times = [f"{h.zfill(2)}:{m}" for h, m in _TIME_TOKEN_RE.findall(line)]
+        if not times:
+            continue
+
+        records.append({
+            "data": data_str,
+            "entrada": min(times),
+            "saida": max(times),
+        })
+    return records
 
 
-def _parse_gemini_response(response_json: dict) -> list[dict]:
+def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
+    """OCR a PDF chunk locally with Tesseract and extract raw records.
+    Never raises — returns [] when Tesseract is unavailable, the bytes
+    aren't a renderable PDF, or no page yields a match.
+    """
     try:
-        text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-        text = _clean_json(text)
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            records = data.get("records") or data.get("data") or []
-            return records if isinstance(records, list) else []
+        from services.tesseract_ocr_service import (
+            TesseractOCRError,
+            is_tesseract_available,
+            ocr_pdf_page_texts,
+        )
+    except ImportError as e:
+        logger.debug("guia: tesseract OCR dependencies not installed: %s", e)
         return []
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        logger.warning("guia: failed to parse Gemini response: %s", e)
+
+    if not is_tesseract_available():
+        logger.debug("guia: Tesseract binary not found, skipping local OCR")
         return []
+
+    try:
+        page_texts = ocr_pdf_page_texts(chunk_bytes)
+    except TesseractOCRError as e:
+        logger.warning("guia: Tesseract OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("guia: Tesseract OCR raised unexpected error: %s", e)
+        return []
+
+    records: list[dict] = []
+    for page_index, text in page_texts:
+        page_records = _extract_records_from_text(text)
+        if page_records:
+            logger.info(
+                "guia: Tesseract OCR — page %d found %d record(s)",
+                page_index, len(page_records),
+            )
+        records.extend(page_records)
+    return records
 
 
 def _date_sort_key(date_str: str) -> tuple[int, int, int]:
@@ -122,58 +156,6 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     return rows
 
 
-async def _process_chunk(chunk_bytes: bytes) -> list[dict]:
-    """Send PDF chunk directly to Gemini — no OCR pre-step, single API call."""
-    encoded = base64.b64encode(chunk_bytes).decode()
-    body = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
-                {"text": GUIA_PROMPT},
-            ]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 16384,
-            "thinkingConfig": {"thinkingBudget": 1024},
-        },
-    }
-
-    for attempt in range(_MAX_RETRIES + 1):
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=300.0, write=120.0, pool=10.0)
-        ) as client:
-            response = await client.post(
-                GEMINI_URL,
-                headers={"x-goog-api-key": settings.GEMINI_API_KEY},
-                json=body,
-            )
-
-        if response.status_code == 200:
-            records = _parse_gemini_response(response.json())
-            logger.info("guia: Gemini returned %d records for chunk", len(records))
-            return records
-
-        if response.status_code in (429, 503) and attempt < _MAX_RETRIES:
-            wait = int(response.headers.get("retry-after", _DEFAULT_WAIT))
-            logger.warning(
-                "guia: Gemini rate limited (%d) — waiting %ds (attempt %d/%d)",
-                response.status_code, wait, attempt + 1, _MAX_RETRIES,
-            )
-            await asyncio.sleep(wait)
-            continue
-
-        logger.error(
-            "guia: Gemini error — status=%d body=%s",
-            response.status_code, response.text[:300],
-        )
-        raise GuiaExtractionError(
-            f"Gemini error {response.status_code}: {response.text[:300]}"
-        )
-
-    return []  # unreachable; satisfies type checker
-
-
 async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_size: int = CHUNK_SIZE):
     """Async generator yielding SSE strings for the guia ministerial extraction."""
     import json as _json
@@ -187,18 +169,12 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
         all_records: list[dict] = []
 
         for i, chunk in enumerate(chunks):
-            yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total})}\n\n"
+            yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total}...'})}\n\n"
 
-            task = asyncio.create_task(_process_chunk(chunk))
+            task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
             while not task.done():
                 yield ": keep-alive\n\n"
                 await asyncio.sleep(15)
-
-            exc = task.exception()
-            if exc is not None:
-                logger.error("guia stream: chunk %d failed — %s", i + 1, exc)
-                yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-                return
 
             all_records.extend(task.result())
 
@@ -220,7 +196,7 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
             "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
             "csv_mime": csv_mime,
             "rows_extracted": len(rows),
-            "provider": "gemini-guia",
+            "provider": "tesseract-guia",
         }, ensure_ascii=False) + "\n\n"
 
     except Exception as e:
@@ -238,7 +214,7 @@ async def extract_with_guia_ministerial(
     all_records: list[dict] = []
     for i, chunk in enumerate(chunks):
         logger.info("guia: processing chunk %d/%d — %d bytes", i + 1, len(chunks), len(chunk))
-        records = await _process_chunk(chunk)
+        records = await asyncio.to_thread(_process_chunk_tesseract, chunk)
         logger.info("guia: chunk %d → %d records", i + 1, len(records))
         all_records.extend(records)
 

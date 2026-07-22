@@ -12,7 +12,7 @@ def _make_result(rows=None) -> ExtractionResult:
             TimesheetRow(data="04/03/2024", ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias"),
             TimesheetRow(data="05/03/2024", entrada_1="08:00", saida_1="12:00", ocorrencia_tipo="meio_periodo"),
         ]
-    return ExtractionResult(rows=rows, provider="gemini", pdf_type="native")
+    return ExtractionResult(rows=rows, provider="tesseract", pdf_type="native")
 
 
 def test_returns_bytes():
@@ -44,7 +44,7 @@ def test_header_background_color():
 
 def test_ferias_row_color():
     rows = [TimesheetRow(data="04/03/2024", ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias")]
-    result = ExtractionResult(rows=rows, provider="gemini", pdf_type="native")
+    result = ExtractionResult(rows=rows, provider="tesseract", pdf_type="native")
     wb = openpyxl.load_workbook(io.BytesIO(build_excel(result)))
     ws = wb["Registros de Ponto"]
     fill = ws.cell(row=2, column=1).fill
@@ -56,7 +56,7 @@ def test_resumo_has_provider():
     wb = openpyxl.load_workbook(io.BytesIO(build_excel(result)))
     ws = wb["Resumo"]
     values = [str(ws.cell(row=r, column=2).value or "") for r in range(1, 15)]
-    assert "gemini" in values
+    assert "tesseract" in values
 
 
 def test_empty_result_does_not_crash():

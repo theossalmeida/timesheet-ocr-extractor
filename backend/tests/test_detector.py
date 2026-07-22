@@ -70,6 +70,13 @@ def test_short_text_counts_as_no_text():
         assert detect_pdf_type(b"fake") == "scanned"
 
 
+def test_cid_encoded_footer_text_counts_as_scanned():
+    cid_text = "(cid:0)(cid:1)(cid:2)(cid:3)(cid:4)(cid:5)" * 20
+    pdf = _mock_pdf([cid_text] * 3)
+    with patch("pdfplumber.open", return_value=pdf):
+        assert detect_pdf_type(b"fake") == "scanned"
+
+
 def test_single_page_native():
     pdf = _mock_pdf(["a" * 100])
     with patch("pdfplumber.open", return_value=pdf):

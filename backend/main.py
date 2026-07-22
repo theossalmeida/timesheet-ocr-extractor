@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import logging
@@ -21,13 +22,13 @@ from services.frequency_cycle_service import (
     stream_frequency_cycle_extraction,
 )
 from services.guia_ministerial_service import stream_guia_extraction
-from services.gemini_service import (
-    GeminiExtractionError,
-    extract_with_gemini,
-    extract_with_gemini_adaptive,
-)
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
+from services.tesseract_ocr_service import (
+    TesseractOCRError,
+    extract_timesheet_rows_tesseract,
+    is_tesseract_available,
+)
 from utils.validators import validate_result, validate_row
 
 logging.basicConfig(level=settings.LOG_LEVEL)
@@ -95,8 +96,34 @@ def _sort_key(date_str: str | None) -> tuple[int, int, int]:
         return (9999, 99, 99)
 
 
+def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
+    """Run local Tesseract OCR extraction for the generic timesheet format,
+    never raising — an empty list means "could not be read locally"
+    (Tesseract not installed, unrenderable bytes, or no rows matched).
+    """
+    if not is_tesseract_available():
+        logger.debug("Tesseract binary not found, skipping local OCR")
+        return []
+    try:
+        rows = extract_timesheet_rows_tesseract(pdf_bytes)
+        if rows:
+            logger.info("Tesseract OCR extracted %d row(s) locally", len(rows))
+        return rows
+    except TesseractOCRError as e:
+        logger.warning("Tesseract OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("Tesseract OCR raised unexpected error: %s", e)
+        return []
+
+
 async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
-    """Run extraction pipeline: pdfplumber → gemini. Returns (result, provider)."""
+    """Run extraction pipeline: pdfplumber -> local Tesseract OCR. Returns (result, provider).
+
+    No external API is used. Tesseract runs locally over rendered page
+    images for anything pdfplumber could not read (scanned pages or pages
+    with an obfuscated/"encrypted" font encoding).
+    """
     pdf_type = detect_pdf_type(pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
 
@@ -105,7 +132,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     # Always attempt local extraction first — detect_pdf_type is only a hint and
     # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
     # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
-    # Gemini must remain the last resort, so it is only reached when pdfplumber yields nothing.
+    # OCR is the fallback, only reached when pdfplumber yields nothing for a page.
     rows = extract_with_pdfplumber(pdf_bytes)
 
     if rows:
@@ -114,27 +141,18 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
         scanned_bytes = get_scanned_page_bytes(pdf_bytes)
         if scanned_bytes:
             pdf_type = "mixed"
-            logger.info("Hybrid PDF: found scanned pages — running Gemini OCR")
-            try:
-                extra_rows = await extract_with_gemini(scanned_bytes)
-                if extra_rows:
-                    provider = "pdfplumber+gemini"
-                    rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                    logger.info("Hybrid merge — total rows=%d", len(rows))
-            except GeminiExtractionError as e:
-                logger.warning("Gemini failed on scanned pages: %s", e)
+            logger.info("Hybrid PDF: found scanned pages — running local Tesseract OCR")
+            extra_rows = await asyncio.to_thread(_run_tesseract_timesheet, scanned_bytes)
+            if extra_rows:
+                provider = "pdfplumber+tesseract"
+                rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                logger.info("Hybrid merge — total rows=%d", len(rows))
 
     if not rows:
-        provider = "gemini"
-        gemini_bytes = get_scanned_page_bytes(pdf_bytes) or pdf_bytes
-        try:
-            rows = await extract_with_gemini_adaptive(gemini_bytes)
-        except GeminiExtractionError as e:
-            logger.error("Gemini failed: %s", e)
-            raise HTTPException(
-                status_code=422,
-                detail="Não foi possível extrair registros de ponto deste PDF.",
-            )
+        tesseract_bytes = get_scanned_page_bytes(pdf_bytes) or pdf_bytes
+        rows = await asyncio.to_thread(_run_tesseract_timesheet, tesseract_bytes)
+        if rows:
+            provider = "tesseract"
 
     if not rows:
         raise HTTPException(

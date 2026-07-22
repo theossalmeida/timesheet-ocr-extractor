@@ -57,3 +57,7 @@ desktop.ini
 NEW_FEATURE.md
 
 *.md
+
+merge_pdfs.py
+
+*.log

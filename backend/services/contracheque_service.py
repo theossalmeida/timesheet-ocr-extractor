@@ -1,35 +1,15 @@
 from __future__ import annotations
 import asyncio
-import base64
 import io
 import logging
 import re
 
-import httpx
 import pdfplumber
 import pypdf
 
 logger = logging.getLogger(__name__)
 
-from config import settings
-
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent"
-CHUNK_SIZE = 5  # pages per Gemini request (used only for fallback)
-
-CONTRACHEQUE_PROMPT = """Você está extraindo dados de contracheques (holerites) de funcionários da Petrobras.
-
-Para CADA PÁGINA do documento, extraia:
-1. "competencia": o campo "Mês/Ano" (formato: MM/YYYY, ex: "01/2022")
-2. "itens": lista de proventos da coluna "Descrição", parando ANTES de "Total de Proventos"
-   - Cada item: {"descricao": "nome", "valor": valor_numerico}
-   - Converta valores: "R$ 10.568,88" → 10568.88
-   - Inclua APENAS PROVENTOS, não deduções nem totais
-
-Retorne APENAS JSON:
-{"paginas": [{"competencia": "01/2022", "itens": [{"descricao": "Salário Básico", "valor": 10568.88}]}]}"""
-
-_MAX_RETRIES = 3
-_DEFAULT_WAIT = 15
+CHUNK_SIZE = 5  # pages per local-OCR request (keeps progress updates granular)
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
@@ -102,41 +82,24 @@ def _parse_item_line(line: str) -> tuple[str, float] | None:
 
 # ── pdfplumber extraction ─────────────────────────────────────────────────────
 
-def _extract_page_pdfplumber(page) -> dict | None:
+def _extract_page_from_text(text: str, competencia: str | None = None) -> dict | None:
     """
-    Attempt to extract competência + salary items from a single pdfplumber Page.
+    Extract competência + salary items directly from a page's plain text —
+    no pdfplumber table access required. This is the shared parser used both
+    as the plain-text pdfplumber fallback and as the parser for Tesseract-OCR'd
+    text (which has no table structure at all).
+
     Returns {"competencia": "MM/YYYY", "itens": [{...}]} or None on failure.
     """
-    # 1. Find competência
-    competencia: str | None = None
-
-    tables = page.extract_tables()
-    for table in tables:
-        for row in (table or [])[:3]:
-            for cell in (row or []):
-                if not cell:
-                    continue
-                m = _COMPETENCIA_RE.search(str(cell))
-                if m:
-                    competencia = m.group(1)
-                    break
-            if competencia:
-                break
-        if competencia:
-            break
+    if not text:
+        return None
 
     if not competencia:
-        text = page.extract_text() or ""
         m = _COMP_FALLBACK_RE.search(text)
         if m:
             competencia = m.group(1)
 
     if not competencia:
-        return None
-
-    # 2. Extract salary items from text
-    text = page.extract_text() or ""
-    if not text:
         return None
 
     header_match = _HEADER_RE.search(text)
@@ -167,6 +130,35 @@ def _extract_page_pdfplumber(page) -> dict | None:
     return {"competencia": competencia, "itens": items}
 
 
+def _extract_page_pdfplumber(page) -> dict | None:
+    """
+    Attempt to extract competência + salary items from a single pdfplumber Page.
+    Returns {"competencia": "MM/YYYY", "itens": [{...}]} or None on failure.
+    """
+    # 1. Find competência from a table cell first (more reliable than the
+    # free-text fallback when the layout is a real table).
+    competencia: str | None = None
+
+    tables = page.extract_tables()
+    for table in tables:
+        for row in (table or [])[:3]:
+            for cell in (row or []):
+                if not cell:
+                    continue
+                m = _COMPETENCIA_RE.search(str(cell))
+                if m:
+                    competencia = m.group(1)
+                    break
+            if competencia:
+                break
+        if competencia:
+            break
+
+    # 2. Extract salary items (and competência fallback) from plain text.
+    text = page.extract_text() or ""
+    return _extract_page_from_text(text, competencia=competencia)
+
+
 def _extract_all_pdfplumber(
     pdf_bytes: bytes,
 ) -> tuple[list[dict], list[int]]:
@@ -194,13 +186,13 @@ def _extract_all_pdfplumber(
                 )
                 results.append(data)
             else:
-                logger.info("contracheque: pdfplumber failed page %d → queued for Gemini", i)
+                logger.info("contracheque: pdfplumber failed page %d → queued for local OCR", i)
                 failed.append(i)
 
     return results, failed
 
 
-# ── Gemini fallback ───────────────────────────────────────────────────────────
+# ── Local Tesseract OCR fallback ──────────────────────────────────────────────
 
 class ContrachequeExtractionError(Exception):
     pass
@@ -238,78 +230,45 @@ def _make_chunks(pages_bytes: list[bytes], chunk_size: int) -> list[bytes]:
     return chunks
 
 
-def _clean_json(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
-
-
-def _parse_gemini_response(response_json: dict) -> list[dict]:
+def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
+    """OCR a PDF chunk locally with Tesseract and parse each page's text with
+    the same competência/item-block parser used for pdfplumber's plain-text
+    fallback. Never raises — returns [] when Tesseract is unavailable, the
+    bytes aren't a renderable PDF, or no page yields a match.
+    """
     try:
-        text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-        text = _clean_json(text)
-        data = __import__("json").loads(text)
-        if isinstance(data, dict):
-            paginas = data.get("paginas") or []
-            return paginas if isinstance(paginas, list) else []
-        if isinstance(data, list):
-            return data
+        from services.tesseract_ocr_service import (
+            TesseractOCRError,
+            is_tesseract_available,
+            ocr_pdf_page_texts,
+        )
+    except ImportError as e:
+        logger.debug("contracheque: tesseract OCR dependencies not installed: %s", e)
+        return []
+
+    if not is_tesseract_available():
+        logger.debug("contracheque: Tesseract binary not found, skipping local OCR")
+        return []
+
+    try:
+        page_texts = ocr_pdf_page_texts(chunk_bytes)
+    except TesseractOCRError as e:
+        logger.warning("contracheque: Tesseract OCR failed: %s", e)
         return []
     except Exception as e:
-        logger.warning("contracheque: failed to parse Gemini response: %s", e)
+        logger.warning("contracheque: Tesseract OCR raised unexpected error: %s", e)
         return []
 
-
-async def _process_chunk_gemini(chunk_bytes: bytes) -> list[dict]:
-    encoded = base64.b64encode(chunk_bytes).decode()
-    body = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
-                {"text": CONTRACHEQUE_PROMPT},
-            ]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 16384,
-            "thinkingConfig": {"thinkingBudget": 1024},
-        },
-    }
-
-    for attempt in range(_MAX_RETRIES + 1):
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=300.0, write=120.0, pool=10.0)
-        ) as client:
-            response = await client.post(
-                GEMINI_URL,
-                headers={"x-goog-api-key": settings.GEMINI_API_KEY},
-                json=body,
+    results: list[dict] = []
+    for page_index, text in page_texts:
+        data = _extract_page_from_text(text)
+        if data:
+            logger.info(
+                "contracheque: Tesseract OK — page %d  comp=%s  items=%d",
+                page_index, data["competencia"], len(data["itens"]),
             )
-
-        if response.status_code == 200:
-            paginas = _parse_gemini_response(response.json())
-            logger.info("contracheque: Gemini returned %d pages for chunk", len(paginas))
-            return paginas
-
-        if response.status_code in (429, 503) and attempt < _MAX_RETRIES:
-            wait = int(response.headers.get("retry-after", _DEFAULT_WAIT))
-            logger.warning(
-                "contracheque: Gemini rate limited (%d) — waiting %ds (attempt %d/%d)",
-                response.status_code, wait, attempt + 1, _MAX_RETRIES,
-            )
-            await asyncio.sleep(wait)
-            continue
-
-        logger.error(
-            "contracheque: Gemini error — status=%d body=%s",
-            response.status_code, response.text[:300],
-        )
-        raise ContrachequeExtractionError(
-            f"Gemini error {response.status_code}: {response.text[:300]}"
-        )
-
-    return []
+            results.append(data)
+    return results
 
 
 # ── Data aggregation ──────────────────────────────────────────────────────────
@@ -389,33 +348,31 @@ async def stream_contracheque_extraction(
             len(plumber_results), len(failed_indices),
         )
 
-        # ── Step 2: Gemini fallback for failed pages ─────────────────
+        # ── Step 2: local Tesseract OCR fallback for failed pages ────
+        ocr_found_rows = False
         if failed_indices:
             logger.info(
-                "contracheque: sending %d page(s) to Gemini — indices %s",
+                "contracheque: sending %d page(s) to local OCR — indices %s",
                 len(failed_indices), failed_indices,
             )
             failed_page_bytes = _split_pages_by_index(pdf_bytes, failed_indices)
-            gemini_chunks = _make_chunks(failed_page_bytes, chunk_size)
-            total_chunks = len(gemini_chunks)
+            ocr_chunks = _make_chunks(failed_page_bytes, chunk_size)
+            total_chunks = len(ocr_chunks)
 
-            for i, chunk in enumerate(gemini_chunks):
-                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total_chunks, 'step': 'gemini', 'message': f'Gemini: processando parte {i + 1} de {total_chunks}...'})}\n\n"
+            for i, chunk in enumerate(ocr_chunks):
+                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total_chunks, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total_chunks}...'})}\n\n"
 
-                task = asyncio.create_task(_process_chunk_gemini(chunk))
+                task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
                 while not task.done():
                     yield ": keep-alive\n\n"
                     await asyncio.sleep(15)
 
-                exc = task.exception()
-                if exc is not None:
-                    logger.error("contracheque: Gemini chunk %d failed — %s", i + 1, exc)
-                    yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-                    return
-
-                all_pages.extend(task.result())
+                chunk_pages = task.result()
+                if chunk_pages:
+                    ocr_found_rows = True
+                all_pages.extend(chunk_pages)
         else:
-            # Signal 100% even if no Gemini was needed
+            # Signal 100% even if no OCR was needed
             yield f"data: {_json.dumps({'type': 'progress', 'chunk': 1, 'total': 1, 'step': 'pdfplumber', 'message': 'Extração concluída com pdfplumber.'})}\n\n"
 
         # ── Step 3: aggregate + build Excel ──────────────────────────
@@ -429,7 +386,9 @@ async def stream_contracheque_extraction(
         provider = (
             "pdfplumber"
             if not failed_indices
-            else ("pdfplumber+gemini" if plumber_results else "gemini")
+            else ("pdfplumber+tesseract" if plumber_results and ocr_found_rows else (
+                "tesseract" if ocr_found_rows else "pdfplumber"
+            ))
         )
 
         excel_bytes = build_contracheque_excel(salary_data)

@@ -1,3 +1,7 @@
+# OCR NOTE (2026-07): builds from the same Dockerfile as fly.toml, which now
+# installs tesseract-ocr + tesseract-ocr-por — required at runtime by
+# services/tesseract_ocr_service.py (local OCR fallback, replacing Gemini).
+
 [build]
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"

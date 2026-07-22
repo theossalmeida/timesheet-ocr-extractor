@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,7 +48,8 @@ def test_all_occurrence_types_counted_in_rows():
     with (
         patch("main.detect_pdf_type", return_value="scanned"),
         patch("main.extract_with_pdfplumber", return_value=None),
-        patch("main.extract_with_gemini", AsyncMock(return_value=rows)),
+        patch("main.get_scanned_page_bytes", return_value=None),
+        patch("main._run_tesseract_timesheet", return_value=rows),
         patch("main.build_excel", return_value=b"PKfake"),
     ):
         r = client.post(
@@ -57,7 +58,7 @@ def test_all_occurrence_types_counted_in_rows():
         )
     assert r.status_code == 200
     assert r.headers["x-rows-extracted"] == "5"
-    assert r.headers["x-provider-used"] == "gemini"
+    assert r.headers["x-provider-used"] == "tesseract"
 
 
 # ─── Mixed row (partial hours + occurrence) ──────────────────────────────────

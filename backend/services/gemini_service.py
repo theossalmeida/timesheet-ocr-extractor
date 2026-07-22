@@ -1,10 +1,13 @@
 from __future__ import annotations
+from io import BytesIO
+import asyncio
 import base64
 import json
 import logging
 import re
 
 import httpx
+import pypdf
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,9 @@ GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-3-flash-preview:generateContent"
 )
+GEMINI_PAGE_CHUNK_SIZE = 2
+GEMINI_TIMEOUT_SECONDS = 180.0
+GEMINI_RETRIES = 2
 
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
 Extract ALL timesheet rows from the provided document.
@@ -108,12 +114,31 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
             "maxOutputTokens": 65536,
         },
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        response = await client.post(
-            GEMINI_URL,
-            params={"key": settings.GEMINI_API_KEY},
-            json=body,
-        )
+    response = None
+    for attempt in range(1, GEMINI_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS)) as client:
+                response = await client.post(
+                    GEMINI_URL,
+                    params={"key": settings.GEMINI_API_KEY},
+                    json=body,
+                )
+            break
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            if attempt >= GEMINI_RETRIES:
+                raise GeminiExtractionError(
+                    f"Gemini request failed after {attempt} attempt(s): {e}"
+                ) from e
+            logger.warning(
+                "Gemini request failed on attempt %d/%d: %s",
+                attempt,
+                GEMINI_RETRIES,
+                e,
+            )
+            await asyncio.sleep(2 * attempt)
+
+    if response is None:
+        raise GeminiExtractionError("Gemini request did not return a response")
     if response.status_code != 200:
         logger.error(
             "Gemini API error — status=%d body=%s",
@@ -124,6 +149,58 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
             f"Gemini API error {response.status_code}: {response.text[:300]}"
         )
     return _parse_gemini_response(response.json())
+
+
+def _split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int) -> list[bytes]:
+    reader = pypdf.PdfReader(BytesIO(pdf_bytes))
+    chunks: list[bytes] = []
+
+    for start in range(0, len(reader.pages), chunk_size):
+        writer = pypdf.PdfWriter()
+        for page_index in range(start, min(start + chunk_size, len(reader.pages))):
+            writer.add_page(reader.pages[page_index])
+        out = BytesIO()
+        writer.write(out)
+        chunks.append(out.getvalue())
+
+    return chunks
+
+
+async def extract_with_gemini_adaptive(
+    pdf_bytes: bytes,
+    chunk_size: int = GEMINI_PAGE_CHUNK_SIZE,
+) -> list[TimesheetRow]:
+    try:
+        page_count = len(pypdf.PdfReader(BytesIO(pdf_bytes)).pages)
+    except Exception:
+        return await extract_with_gemini(pdf_bytes)
+
+    if page_count <= chunk_size:
+        return await extract_with_gemini(pdf_bytes)
+
+    rows: list[TimesheetRow] = []
+    last_error: GeminiExtractionError | None = None
+
+    for chunk in _split_pdf_into_chunks(pdf_bytes, chunk_size):
+        try:
+            rows.extend(await extract_with_gemini(chunk))
+            continue
+        except GeminiExtractionError as e:
+            last_error = e
+            logger.warning("Gemini chunk failed; retrying as single pages: %s", e)
+
+        for page_chunk in _split_pdf_into_chunks(chunk, 1):
+            try:
+                rows.extend(await extract_with_gemini(page_chunk))
+            except GeminiExtractionError as e:
+                last_error = e
+                logger.warning("Gemini single-page fallback failed: %s", e)
+
+    if rows:
+        return rows
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:

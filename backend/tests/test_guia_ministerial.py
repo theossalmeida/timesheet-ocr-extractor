@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 import io
 import pypdf
 import pytest
@@ -6,7 +6,7 @@ import pytest
 from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
-    _parse_gemini_response,
+    _extract_records_from_text,
     _split_pdf_chunks,
     extract_with_guia_ministerial,
 )
@@ -22,10 +22,6 @@ def _make_minimal_pdf(n_pages: int = 1) -> bytes:
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
-
-
-def _gemini_payload(text: str) -> dict:
-    return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
 
 # ── _date_sort_key ────────────────────────────────────────────────────────────
@@ -132,27 +128,42 @@ def test_aggregate_hhmm_time_format():
     assert rows[0].saida_1 == "17:00"
 
 
-# ── _parse_gemini_response ────────────────────────────────────────────────────
+# ── _extract_records_from_text (local OCR parser) ────────────────────────────
 
-def test_parse_gemini_response_records_key():
-    payload = _gemini_payload('{"records": [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]}')
-    result = _parse_gemini_response(payload)
-    assert len(result) == 1
-    assert result[0]["data"] == "01/03/2024"
-
-
-def test_parse_gemini_response_top_level_array():
-    payload = _gemini_payload('[{"data": "02/03/2024", "entrada": "09:00", "saida": "18:00"}]')
-    result = _parse_gemini_response(payload)
-    assert len(result) == 1
+def test_extract_records_from_text_finds_date_and_times():
+    text = "25/01/2024 Hora Entrada 06:30 Hora Saida 14:50"
+    records = _extract_records_from_text(text)
+    assert records == [{"data": "25/01/2024", "entrada": "06:30", "saida": "14:50"}]
 
 
-def test_parse_gemini_response_invalid_json():
-    assert _parse_gemini_response(_gemini_payload("not json")) == []
+def test_extract_records_from_text_uses_earliest_and_latest_time_on_line():
+    text = "01/03/2024 08:00 12:00 13:00 17:00"
+    records = _extract_records_from_text(text)
+    assert records == [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
 
 
-def test_parse_gemini_response_markdown_fenced():
-    assert _parse_gemini_response(_gemini_payload('```json\n{"records": []}\n```')) == []
+def test_extract_records_from_text_expands_two_digit_year():
+    text = "05/02/24 07:00 15:00"
+    records = _extract_records_from_text(text)
+    assert records[0]["data"] == "05/02/2024"
+
+
+def test_extract_records_from_text_ignores_lines_without_times():
+    text = "25/01/2024 apenas uma data sem horario\noutra linha qualquer"
+    assert _extract_records_from_text(text) == []
+
+
+def test_extract_records_from_text_ignores_lines_without_dates():
+    text = "06:30 14:50 sem data nesta linha"
+    assert _extract_records_from_text(text) == []
+
+
+def test_extract_records_from_text_multiple_lines():
+    text = "01/03/2024 06:00 14:00\n02/03/2024 07:00 15:00"
+    records = _extract_records_from_text(text)
+    assert len(records) == 2
+    assert records[0]["data"] == "01/03/2024"
+    assert records[1]["data"] == "02/03/2024"
 
 
 # ── extract_with_guia_ministerial (mocked) ────────────────────────────────────
@@ -162,8 +173,8 @@ async def test_extract_calls_process_chunk_per_chunk():
     pdf = _make_minimal_pdf(25)  # 3 chunks of 10+10+5
     mock_records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
 
-    with patch("services.guia_ministerial_service._process_chunk",
-               new=AsyncMock(return_value=mock_records)) as mock_call:
+    with patch("services.guia_ministerial_service._process_chunk_tesseract",
+               return_value=mock_records) as mock_call:
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 
     assert mock_call.call_count == 3
@@ -180,8 +191,8 @@ async def test_extract_merges_chunks():
         [{"data": "02/03/2024", "entrada": "06:00", "saida": "14:00"}],
     ]
 
-    with patch("services.guia_ministerial_service._process_chunk",
-               new=AsyncMock(side_effect=chunk_results)):
+    with patch("services.guia_ministerial_service._process_chunk_tesseract",
+               side_effect=chunk_results):
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 
     assert len(rows) == 2

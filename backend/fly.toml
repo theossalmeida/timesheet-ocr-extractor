@@ -2,6 +2,16 @@
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
+# OCR NOTE (2026-07): PDF extraction fell back to local Tesseract OCR
+# (services/tesseract_ocr_service.py) instead of the Gemini API for scanned
+# pages and pages with an obfuscated/"encrypted" font encoding. Tesseract is
+# CPU-bound: OCR-ing a single page takes a few seconds on 1 shared vCPU, so a
+# large scanned/encrypted document (100+ pages) can take minutes end-to-end.
+# The [[vm]] size below (1 shared vCPU / 1GB) was kept as-is deliberately —
+# this app has a single user who rarely sends more than 1 PDF at a time
+# (worst case ~2 concurrent) — but if usage grows to multiple concurrent
+# users or routinely large documents, bump to 2 vCPU / 2GB first (OCR
+# throughput + headroom against OOM when two large OCR jobs overlap).
 
 app = 'timesheet-api'
 primary_region = 'gru'
@@ -20,11 +30,19 @@ primary_region = 'gru'
   auto_stop_machines = 'stop'
   min_machines_running = 0
 
+  # hard_limit/soft_limit are far above actual expected load (single user,
+  # rarely >2 simultaneous PDF uploads) — they cap abuse/retries, not normal
+  # traffic. Each concurrent request that needs OCR runs Tesseract as its own
+  # subprocess; if concurrent usage ever grows meaningfully, lower these
+  # limits and/or bump [[vm]] below before it becomes a real bottleneck.
   [http_service.concurrency]
     type = 'requests'
     hard_limit = 25
     soft_limit = 20
 
+# 1 shared vCPU / 1GB RAM — sized for a single user doing local Tesseract OCR
+# on at most ~2 concurrent PDFs. See the OCR NOTE above before increasing
+# traffic expectations for this app.
 [[vm]]
   memory = '1gb'
   cpus = 1

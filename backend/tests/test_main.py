@@ -1,7 +1,7 @@
 import io
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
@@ -67,14 +67,13 @@ def test_extract_success_returns_bundle():
 
 def test_extract_uses_pdfplumber_even_when_type_not_native():
     """detect_pdf_type is only a hint; pdfplumber must run for every type and
-    Gemini must never be invoked when pdfplumber already extracted rows."""
-    gemini_mock = AsyncMock(return_value=[])
+    Tesseract must never be invoked when pdfplumber already extracted rows."""
+    tesseract_mock = MagicMock(return_value=[])
     for detected_type in ("mixed", "scanned"):
         with patch("main.detect_pdf_type", return_value=detected_type), \
              patch("main.extract_with_pdfplumber", return_value=SAMPLE_ROWS), \
              patch("main.get_scanned_page_bytes", return_value=None), \
-             patch("main.extract_with_gemini", gemini_mock), \
-             patch("main.extract_with_gemini_adaptive", gemini_mock), \
+             patch("main._run_tesseract_timesheet", tesseract_mock), \
              patch("main.build_excel", return_value=b"PKfake"):
             data = io.BytesIO(MINIMAL_PDF)
             r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
@@ -82,44 +81,43 @@ def test_extract_uses_pdfplumber_even_when_type_not_native():
         assert r.status_code == 200
         assert r.headers["x-provider-used"] == "pdfplumber"
         assert r.json()["rows_extracted"] == 2
-    gemini_mock.assert_not_awaited()
+    tesseract_mock.assert_not_called()
 
 
-def test_extract_fallback_to_gemini():
-    gemini_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+def test_extract_fallback_to_tesseract():
+    tesseract_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=None), \
-         patch("main.extract_with_gemini_adaptive", AsyncMock(return_value=gemini_rows)), \
+         patch("main._run_tesseract_timesheet", return_value=tesseract_rows), \
          patch("main.build_excel", return_value=b"PKfake"):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
     assert r.status_code == 200
-    assert r.headers["x-provider-used"] == "gemini"
+    assert r.headers["x-provider-used"] == "tesseract"
 
 
-def test_extract_fallback_sends_scanned_pages_to_gemini():
-    gemini_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
-    gemini_mock = AsyncMock(return_value=gemini_rows)
+def test_extract_fallback_sends_scanned_pages_to_tesseract():
+    tesseract_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    tesseract_mock = MagicMock(return_value=tesseract_rows)
     with patch("main.detect_pdf_type", return_value="native"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=b"scanned-pages"), \
-         patch("main.extract_with_gemini_adaptive", gemini_mock), \
+         patch("main._run_tesseract_timesheet", tesseract_mock), \
          patch("main.build_excel", return_value=b"PKfake"):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
     assert r.status_code == 200
-    gemini_mock.assert_awaited_once_with(b"scanned-pages")
+    tesseract_mock.assert_called_once_with(b"scanned-pages")
 
 
-def test_extract_gemini_fail_returns_422():
-    from services.gemini_service import GeminiExtractionError
+def test_extract_tesseract_fail_returns_422():
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=None), \
-         patch("main.extract_with_gemini_adaptive", AsyncMock(side_effect=GeminiExtractionError("fail"))):
+         patch("main._run_tesseract_timesheet", return_value=[]):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 

@@ -35,6 +35,48 @@ _NOISE_RE = re.compile(
 )
 
 
+def _pdf_object_has_image(obj, depth: int = 0) -> bool:
+    if depth > 3:
+        return False
+    try:
+        resolved = obj.get_object() if hasattr(obj, "get_object") else obj
+    except Exception:
+        return False
+    if not isinstance(resolved, dict):
+        return False
+    if resolved.get("/Subtype") == "/Image":
+        return True
+    resources = resolved.get("/Resources") or {}
+    try:
+        resources = resources.get_object() if hasattr(resources, "get_object") else resources
+    except Exception:
+        resources = {}
+    xobjects = resources.get("/XObject") if isinstance(resources, dict) else None
+    try:
+        xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
+    except Exception:
+        xobjects = None
+    if not isinstance(xobjects, dict):
+        return False
+    return any(_pdf_object_has_image(child, depth + 1) for child in xobjects.values())
+
+
+def _pypdf_page_has_image(page) -> bool:
+    resources = page.get("/Resources") or {}
+    try:
+        resources = resources.get_object() if hasattr(resources, "get_object") else resources
+    except Exception:
+        return False
+    xobjects = resources.get("/XObject") if isinstance(resources, dict) else None
+    try:
+        xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
+    except Exception:
+        return False
+    if not isinstance(xobjects, dict):
+        return False
+    return any(_pdf_object_has_image(obj) for obj in xobjects.values())
+
+
 def _parse_text_rows(full_text: str) -> list[TimesheetRow]:
     """Parse fixed-width text timesheets (FOLHA DE PONTO format).
 
@@ -309,9 +351,17 @@ def get_scanned_page_bytes(pdf_bytes: bytes) -> bytes | None:
     rows in its text/tables.  Returns None when no such pages are found.
     """
     scanned_indices: list[int] = []
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as e:
+        logger.debug("get_scanned_page_bytes: pypdf image scan unavailable: %s", e)
+        reader = None
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, page in enumerate(pdf.pages):
-            if not page.images:
+            has_image = bool(page.images)
+            if not has_image and reader is not None and i < len(reader.pages):
+                has_image = _pypdf_page_has_image(reader.pages[i])
+            if not has_image:
                 continue  # no images → cannot be a scanned page
 
             text = page.extract_text() or ""
@@ -350,7 +400,8 @@ def get_scanned_page_bytes(pdf_bytes: bytes) -> bytes | None:
         len(scanned_indices),
         scanned_indices,
     )
-    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    if reader is None:
+        return None
     writer = pypdf.PdfWriter()
     for idx in scanned_indices:
         writer.add_page(reader.pages[idx])

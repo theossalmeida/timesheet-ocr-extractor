@@ -3,7 +3,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # No longer used by the active extraction pipeline — OCR now runs locally
+    # via Tesseract (services/tesseract_ocr_service.py). Kept as a required
+    # field only because services/gemini_service.py (unused/dead code) still
+    # references it; services/mistral_service.py (also unused) depends on it too.
     GEMINI_API_KEY: str
+    MISTRAL_API_KEY: str = ""
+    # Optional explicit path to the Tesseract binary (e.g.
+    # "C:\Program Files\Tesseract-OCR\tesseract.exe"). Only needed when the
+    # binary is installed but NOT on the system PATH — common on Windows dev
+    # machines. Leave empty to rely on PATH resolution (the default in Docker/
+    # Fly.io, where apt-get installs it onto PATH already).
+    TESSERACT_CMD: str = ""
     ENVIRONMENT: str = "development"
     MAX_FILE_SIZE_MB: int = 50
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
