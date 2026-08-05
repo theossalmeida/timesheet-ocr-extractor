@@ -68,8 +68,7 @@ def test_mixed_row_partial_hours_and_occurrence():
     mixed_rows = [
         TimesheetRow(
             data="01/03/2024",
-            entrada_1="08:00",
-            saida_1="12:00",
+            marcacoes=["08:00", "12:00"],
             ocorrencia_raw="ATESTADO",
             ocorrencia_tipo="licenca_medica",
         )
@@ -93,7 +92,7 @@ def test_mixed_row_partial_hours_and_occurrence():
 def test_rate_limit_triggers_429_on_extract():
     """The 11th /extract request within a minute must receive HTTP 429."""
     client = TestClient(app)
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
 
     with (
         patch("main.detect_pdf_type", return_value="native"),
@@ -115,7 +114,7 @@ def test_rate_limit_triggers_429_on_extract():
 def test_rate_limit_triggers_429_on_preview():
     """The 11th /preview request within a minute must receive HTTP 429."""
     client = TestClient(app)
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
 
     with (
         patch("main.detect_pdf_type", return_value="native"),
@@ -136,7 +135,7 @@ def test_rate_limit_triggers_429_on_preview():
 
 def test_extract_logs_request_start(caplog):
     """POST /extract must log filename and byte size at INFO level."""
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
     client = TestClient(app)
 
     with (
@@ -157,7 +156,7 @@ def test_extract_logs_request_start(caplog):
 
 def test_pipeline_logs_extraction_result(caplog):
     """_run_pipeline must log provider, row count, and pdf_type after extraction."""
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
     client = TestClient(app)
 
     with (

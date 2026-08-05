@@ -36,8 +36,7 @@ def _mock_error_response(status: int, text: str = "error") -> MagicMock:
 
 def test_extract_success():
     data = [
-        {"data": "01/03/2024", "entrada_1": "08:00", "saida_1": "17:00",
-         "entrada_2": None, "saida_2": None, "ocorrencia_raw": None},
+        {"data": "01/03/2024", "marcacoes": ["08:00", "17:00"], "ocorrencia_raw": None},
     ]
     mock_response = _mock_response(200, data)
     mock_client = AsyncMock()
@@ -50,7 +49,7 @@ def test_extract_success():
 
     assert len(rows) == 1
     assert rows[0].data == "01/03/2024"
-    assert rows[0].entrada_1 == "08:00"
+    assert rows[0].marcacoes[0] == "08:00"
 
 
 def test_extract_raises_on_non_200():
@@ -98,8 +97,7 @@ def test_extract_raises_on_invalid_json():
 
 
 def test_normalize_text_success():
-    data = [{"data": "01/03/2024", "entrada_1": "08:00", "saida_1": "12:00",
-              "entrada_2": None, "saida_2": None, "ocorrencia_raw": None}]
+    data = [{"data": "01/03/2024", "marcacoes": ["08:00", "12:00"], "ocorrencia_raw": None}]
     mock_response = _mock_response(200, data)
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(return_value=mock_response)
@@ -113,8 +111,7 @@ def test_normalize_text_success():
 
 
 def test_extract_with_occurrence():
-    data = [{"data": "05/03/2024", "entrada_1": None, "saida_1": None,
-              "entrada_2": None, "saida_2": None, "ocorrencia_raw": "FERIAS"}]
+    data = [{"data": "05/03/2024", "marcacoes": [], "ocorrencia_raw": "FERIAS"}]
     mock_response = _mock_response(200, data)
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(return_value=mock_response)
@@ -129,7 +126,7 @@ def test_extract_with_occurrence():
 
 
 def test_adaptive_extract_chunks_large_pdf_before_gemini():
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00"])]
     reader = MagicMock()
     reader.pages = [object()] * 6
 
@@ -153,7 +150,7 @@ def test_adaptive_extract_chunks_large_pdf_before_gemini():
 
 
 def test_adaptive_extract_retries_failed_chunk_as_single_pages():
-    rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00")]
+    rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00"])]
     reader = MagicMock()
     reader.pages = [object()] * 3
 

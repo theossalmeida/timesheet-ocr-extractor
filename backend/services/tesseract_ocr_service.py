@@ -196,7 +196,8 @@ def extract_frequency_day_texts_for_pages(
 def extract_timesheet_rows_tesseract(pdf_bytes: bytes) -> list:
     """OCR the PDF locally with Tesseract and parse it with the same
     generic timesheet parsers `pdfplumber_service` uses for native text
-    (fixed-width "DD/MM/YYYY WEEKDAY ..." rows, and merged multi-row cells).
+    (fixed-width "DD/MM/YYYY WEEKDAY ..." rows, "WEEKDAY DD/MM/YY ..." rows,
+    and merged multi-row cells).
 
     Returns `list[TimesheetRow]`, matching the shape `extract_with_pdfplumber`
     produces, so the rest of the pipeline (aggregation, Excel/CSV building)
@@ -206,12 +207,13 @@ def extract_timesheet_rows_tesseract(pdf_bytes: bytes) -> list:
         _MULTIROW_DATE_RE,
         _parse_multirow_cell,
         _parse_text_rows,
+        _parse_weekday_first_rows,
     )
 
     page_texts = ocr_pdf_page_texts(pdf_bytes)
     full_text = "\n".join(text for _, text in page_texts)
 
-    rows = _parse_text_rows(full_text)
+    rows = _parse_text_rows(full_text) or _parse_weekday_first_rows(full_text)
     if rows:
         return rows
 

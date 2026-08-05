@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import calendar
+import difflib
 import json
 import logging
 import re
@@ -44,12 +46,45 @@ VACATION_DAY_ONLY_ROW_RE = re.compile(
     r"(?P<details>(?:\d{2}:\d{2}\s+)?1019\b.*)$",
     re.IGNORECASE,
 )
+
+# Loose counterparts of DATE_ROW_RE / DAY_ONLY_ROW_RE that accept any token in
+# the scale position instead of the strict SCALE_PATTERN alternation. Used
+# only as a fallback when the strict regex already failed to match a line —
+# the captured token is then passed through _fuzzy_match_scale, which is the
+# thing actually deciding whether the OCR misread is close enough to a known
+# scale code to recover. Day/month digits and the trailing anchor stay
+# strict: the reported failure mode is misread scale letters, not digits.
+DATE_ROW_LOOSE_RE = re.compile(
+    r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
+    r"(?P<scale>\S+)\b(?P<details>.*?)"
+    r"(?:Sobreaviso|Turno\s+de\s+\d+\s+Hor\s*as)$",
+    re.IGNORECASE,
+)
+DAY_ONLY_ROW_LOOSE_RE = re.compile(
+    r"^(?P<day>\d{2})\s+\S+\s+"
+    r"(?P<scale>\S+)\b(?P<details>.*)$",
+    re.IGNORECASE,
+)
+
 DAY_OFF_SCALES = {"FOLG", "LIVR"}
+
+_LITERAL_SCALE_CODES = ("FOLG", "LIVR", "HXGU", "HXHI", "HX01")
+_PREFIX_SCALE_FAMILIES = ("HS", "HT")
+_SCALE_FUZZY_CUTOFF = 0.75
+_SCALE_PREFIX_FUZZY_CUTOFF = 0.5
 PERIOD_RE = re.compile(
     r"Per[ií]odo\s*:?\s*"
     r"\d{2}[./](?P<month>\d{2})[./](?P<year>\d{4})",
     re.IGNORECASE,
 )
+# Looser than PERIOD_RE: matches the word "Periodo" even if OCR mangles the
+# accented letter, with no requirement that the trailing date digits parsed
+# cleanly. Used only to tell apart two different reasons a page has no
+# current_year/current_month: a genuine continuation page (no header at all,
+# safe to keep using whatever a previous page set) vs. a page that clearly
+# carries its own header but got OCR-garbled digits (must NOT silently reuse
+# a previous page's month - see _resolve_pending_months).
+PERIODO_WORD_RE = re.compile(r"per[a-zí]{0,4}odo", re.IGNORECASE)
 TIME_RE = re.compile(r"\b\d{2}:\d{2}\b")
 VACATION_CODE_RE = re.compile(r"\b1019\b")
 
@@ -71,6 +106,7 @@ class FrequencyDay:
     details: str
     pdf_line: str
     page: int
+    ocr_corrected: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +119,7 @@ class ClassifiedDay:
     details: str
     pdf_line: str
     page: int
+    ocr_corrected: bool = False
     expected_cycle_day: int | None = None
     expected_situation: str | None = None
     exact_match: bool | None = None
@@ -146,6 +183,35 @@ def has_vacation_marker(details: str) -> bool:
     return bool(VACATION_CODE_RE.search(details or ""))
 
 
+def _fuzzy_match_scale(token: str) -> str | None:
+    """Best-effort correction for a single OCR-misread scale token.
+
+    Only meant to be called on a line the strict SCALE_PATTERN regexes
+    already failed to match — this never overrides a clean read. Returns
+    None (no correction, caller must not fabricate a row) unless the token
+    is unambiguously close to exactly one canonical scale code.
+    """
+    candidate = (token or "").strip().upper()
+    if not candidate:
+        return None
+
+    literal_match = difflib.get_close_matches(
+        candidate, _LITERAL_SCALE_CODES, n=1, cutoff=_SCALE_FUZZY_CUTOFF
+    )
+    if literal_match:
+        return literal_match[0]
+
+    prefix, digits = candidate[:2], candidate[2:]
+    if digits.isdigit():
+        prefix_matches = difflib.get_close_matches(
+            prefix, _PREFIX_SCALE_FAMILIES, n=2, cutoff=_SCALE_PREFIX_FUZZY_CUTOFF
+        )
+        if len(prefix_matches) == 1:
+            return f"{prefix_matches[0]}{digits}"
+
+    return None
+
+
 def _looks_like_frequency_day_page(text: str) -> bool:
     compact = compact_label(text)
     if not compact:
@@ -155,35 +221,133 @@ def _looks_like_frequency_day_page(text: str) -> bool:
     return "PERIODO" in compact and "DIAESCALA" in compact
 
 
+_DAY_LIKE_LINE_RE = re.compile(r"^\d{2}(?:/\d{2})?\s")
+
+
+@dataclass
+class _ParsedRow:
+    day: str
+    month: str | None
+    scale: str
+    details: str
+    ocr_corrected: bool
+    raw_scale: str | None = None
+
+
+@dataclass
+class _PendingDayOnlyRow:
+    page: int
+    day: int
+    scale: str
+    details: str
+    pdf_line: str
+    ocr_corrected: bool
+
+
+def _match_date_row(stripped: str) -> _ParsedRow | None:
+    match = DATE_ROW_RE.match(stripped)
+    if match:
+        return _ParsedRow(
+            day=match.group("day"),
+            month=match.group("month"),
+            scale=match.group("scale"),
+            details=match.group("details"),
+            ocr_corrected=False,
+        )
+
+    loose = DATE_ROW_LOOSE_RE.match(stripped)
+    if loose:
+        corrected = _fuzzy_match_scale(loose.group("scale"))
+        if corrected:
+            return _ParsedRow(
+                day=loose.group("day"),
+                month=loose.group("month"),
+                scale=corrected,
+                details=loose.group("details"),
+                ocr_corrected=True,
+                raw_scale=loose.group("scale"),
+            )
+
+    return None
+
+
+def _match_day_only_row(stripped: str) -> _ParsedRow | None:
+    match = DAY_ONLY_ROW_RE.match(stripped)
+    if match:
+        return _ParsedRow(
+            day=match.group("day"),
+            month=None,
+            scale=match.group("scale"),
+            details=match.group("details"),
+            ocr_corrected=False,
+        )
+
+    loose = DAY_ONLY_ROW_LOOSE_RE.match(stripped)
+    if loose:
+        corrected = _fuzzy_match_scale(loose.group("scale"))
+        if corrected:
+            return _ParsedRow(
+                day=loose.group("day"),
+                month=None,
+                scale=corrected,
+                details=loose.group("details"),
+                ocr_corrected=True,
+                raw_scale=loose.group("scale"),
+            )
+
+    return None
+
+
 def _extract_frequency_days_from_page_texts(page_texts: Iterable[tuple[int, str]]) -> list[FrequencyDay]:
     rows: list[FrequencyDay] = []
+    known_periods: set[tuple[int, int]] = set()
+    pending_by_page: dict[int, list[_PendingDayOnlyRow]] = {}
     current_year: int | None = None
     current_month: int | None = None
 
     for page_index, text in page_texts:
         period_match = PERIOD_RE.search(text)
+        page_period_failed = False
         if period_match:
             current_year = int(period_match.group("year"))
             current_month = int(period_match.group("month"))
+            known_periods.add((current_year, current_month))
+        elif PERIODO_WORD_RE.search(text):
+            # This page has its own "Periodo" header, but the digits after it
+            # didn't parse cleanly - do not silently keep using whatever
+            # month a PREVIOUS page set current_year/current_month to, that
+            # would misattribute this page's days to the wrong month. Its
+            # day-only rows go to the pending buffer instead (see
+            # _resolve_pending_months). A page with no "Periodo" word at all
+            # is a genuine continuation page and keeps the carried-over month.
+            page_period_failed = True
 
         for line in text.splitlines():
             stripped = line.strip()
-            match = DATE_ROW_RE.match(stripped)
-            if match and current_year is not None:
-                row_date = date(
-                    current_year,
-                    int(match.group("month")),
-                    int(match.group("day")),
-                )
-                rows.append(
-                    FrequencyDay(
-                        date=row_date,
-                        scale=match.group("scale"),
-                        details=match.group("details").strip(),
-                        pdf_line=stripped,
-                        page=page_index,
+            if not stripped:
+                continue
+
+            parsed = _match_date_row(stripped)
+            if parsed is not None:
+                if current_year is not None:
+                    row_date = date(current_year, int(parsed.month), int(parsed.day))
+                    rows.append(
+                        FrequencyDay(
+                            date=row_date,
+                            scale=parsed.scale,
+                            details=parsed.details.strip(),
+                            pdf_line=stripped,
+                            page=page_index,
+                            ocr_corrected=parsed.ocr_corrected,
+                        )
                     )
-                )
+                    known_periods.add((row_date.year, row_date.month))
+                    if parsed.ocr_corrected:
+                        logger.warning(
+                            "frequency: recovered OCR-misread scale on page %d: "
+                            "%r -> %r (line=%r)",
+                            page_index, parsed.raw_scale, parsed.scale, stripped,
+                        )
                 continue
 
             match = VACATION_DATE_ROW_RE.match(stripped)
@@ -202,54 +366,191 @@ def _extract_frequency_days_from_page_texts(page_texts: Iterable[tuple[int, str]
                         page=page_index,
                     )
                 )
+                known_periods.add((row_date.year, row_date.month))
                 continue
 
-            match = DAY_ONLY_ROW_RE.match(stripped)
-            if match and current_year is not None and current_month is not None:
-                try:
-                    row_date = date(
-                        current_year,
-                        current_month,
-                        int(match.group("day")),
-                    )
-                except ValueError:
-                    continue
+            parsed = _match_day_only_row(stripped)
+            if parsed is not None:
+                if current_year is not None and current_month is not None and not page_period_failed:
+                    try:
+                        row_date = date(current_year, current_month, int(parsed.day))
+                    except ValueError:
+                        continue
 
-                rows.append(
-                    FrequencyDay(
-                        date=row_date,
-                        scale=match.group("scale"),
-                        details=match.group("details").strip(),
-                        pdf_line=stripped,
-                        page=page_index,
+                    rows.append(
+                        FrequencyDay(
+                            date=row_date,
+                            scale=parsed.scale,
+                            details=parsed.details.strip(),
+                            pdf_line=stripped,
+                            page=page_index,
+                            ocr_corrected=parsed.ocr_corrected,
+                        )
                     )
-                )
+                    if parsed.ocr_corrected:
+                        logger.warning(
+                            "frequency: recovered OCR-misread scale on page %d: "
+                            "%r -> %r (line=%r)",
+                            page_index, parsed.raw_scale, parsed.scale, stripped,
+                        )
+                else:
+                    pending_by_page.setdefault(page_index, []).append(
+                        _PendingDayOnlyRow(
+                            page=page_index,
+                            day=int(parsed.day),
+                            scale=parsed.scale,
+                            details=parsed.details.strip(),
+                            pdf_line=stripped,
+                            ocr_corrected=parsed.ocr_corrected,
+                        )
+                    )
                 continue
 
             match = VACATION_DAY_ONLY_ROW_RE.match(stripped)
-            if not match or current_year is None or current_month is None:
+            if match:
+                if current_year is not None and current_month is not None and not page_period_failed:
+                    try:
+                        row_date = date(current_year, current_month, int(match.group("day")))
+                    except ValueError:
+                        continue
+
+                    rows.append(
+                        FrequencyDay(
+                            date=row_date,
+                            scale="",
+                            details=match.group("details").strip(),
+                            pdf_line=stripped,
+                            page=page_index,
+                        )
+                    )
+                else:
+                    pending_by_page.setdefault(page_index, []).append(
+                        _PendingDayOnlyRow(
+                            page=page_index,
+                            day=int(match.group("day")),
+                            scale="",
+                            details=match.group("details").strip(),
+                            pdf_line=stripped,
+                            ocr_corrected=False,
+                        )
+                    )
                 continue
 
-            try:
-                row_date = date(
-                    current_year,
-                    current_month,
-                    int(match.group("day")),
+            if _DAY_LIKE_LINE_RE.match(stripped):
+                logger.debug(
+                    "frequency: page %d line looked like a day row but matched "
+                    "nothing, even loosely: %r",
+                    page_index, stripped,
                 )
+
+    rows.extend(_resolve_pending_months(pending_by_page, known_periods))
+
+    return sorted(rows, key=lambda row: row.date)
+
+
+def _resolve_pending_months(
+    pending_by_page: dict[int, list[_PendingDayOnlyRow]],
+    known_periods: set[tuple[int, int]],
+) -> list[FrequencyDay]:
+    """End-of-document pass: assign a (year, month) to day-only rows whose
+    page never produced a readable "Periodo" header.
+
+    Page order in these PDFs is not guaranteed to be chronological, so this
+    never infers from page position/adjacency. A candidate month is only
+    accepted when it is the single unambiguous gap in the calendar range
+    already known from every other page in the document, every buffered day
+    number is a valid day-of-month for it, and no other pending page claims
+    the same gap. Anything else is left unresolved and logged loudly instead
+    of guessed - this is payroll data.
+    """
+    if not pending_by_page:
+        return []
+
+    if not known_periods:
+        for page_index, candidates in pending_by_page.items():
+            logger.warning(
+                "frequency: page %d has %d day-only row(s) with no readable "
+                "Periodo header anywhere in the document to infer a month "
+                "from; days %s were dropped",
+                page_index, len(candidates), sorted(c.day for c in candidates),
+            )
+        return []
+
+    ordered_periods = sorted(known_periods)
+    start_year, start_month = ordered_periods[0]
+    end_year, end_month = ordered_periods[-1]
+
+    full_range: list[tuple[int, int]] = []
+    year, month = start_year, start_month
+    while (year, month) <= (end_year, end_month):
+        full_range.append((year, month))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+
+    gap_months = [period for period in full_range if period not in known_periods]
+
+    resolutions: dict[int, tuple[int, int]] = {}
+    for page_index, candidates in pending_by_page.items():
+        max_day = max(c.day for c in candidates)
+        page_candidates = [
+            period for period in gap_months
+            if max_day <= calendar.monthrange(period[0], period[1])[1]
+        ]
+        if len(page_candidates) == 1:
+            resolutions[page_index] = page_candidates[0]
+        else:
+            logger.warning(
+                "frequency: could not infer month for page %d (%d day-only "
+                "row(s), days %s) - %d gap month candidate(s) survived the "
+                "sanity check; leaving these days unrecovered",
+                page_index, len(candidates),
+                sorted(c.day for c in candidates), len(page_candidates),
+            )
+
+    month_claims: dict[tuple[int, int], list[int]] = {}
+    for page_index, period in resolutions.items():
+        month_claims.setdefault(period, []).append(page_index)
+
+    recovered: list[FrequencyDay] = []
+    for page_index, candidates in pending_by_page.items():
+        period = resolutions.get(page_index)
+        if period is None:
+            continue
+
+        claimants = month_claims[period]
+        if len(claimants) > 1:
+            logger.warning(
+                "frequency: pages %s all inferred the same month %04d-%02d - "
+                "ambiguous, leaving their day-only rows unrecovered",
+                claimants, period[0], period[1],
+            )
+            continue
+
+        year, month = period
+        logger.warning(
+            "frequency: inferred page %d belongs to %04d-%02d (single gap "
+            "in the document's monthly sequence, all %d day(s) fit)",
+            page_index, year, month, len(candidates),
+        )
+        for candidate in candidates:
+            try:
+                row_date = date(year, month, candidate.day)
             except ValueError:
                 continue
-
-            rows.append(
+            recovered.append(
                 FrequencyDay(
                     date=row_date,
-                    scale="",
-                    details=match.group("details").strip(),
-                    pdf_line=stripped,
-                    page=page_index,
+                    scale=candidate.scale,
+                    details=candidate.details,
+                    pdf_line=candidate.pdf_line,
+                    page=candidate.page,
+                    ocr_corrected=True,
                 )
             )
 
-    return sorted(rows, key=lambda row: row.date)
+    return recovered
 
 
 def _extract_frequency_days_with_pypdf(pdf_bytes: bytes) -> list[FrequencyDay]:
@@ -420,6 +721,7 @@ def classify_frequency_days(days: Iterable[FrequencyDay]) -> list[ClassifiedDay]
                 details=day.details,
                 pdf_line=day.pdf_line,
                 page=day.page,
+                ocr_corrected=day.ocr_corrected,
             )
         )
         previous_group = group
@@ -450,6 +752,7 @@ def compare_with_expected(
                 details=day.details,
                 pdf_line=day.pdf_line,
                 page=day.page,
+                ocr_corrected=day.ocr_corrected,
                 expected_cycle_day=expected_cycle_day,
                 expected_situation=expected_situation,
                 exact_match=(

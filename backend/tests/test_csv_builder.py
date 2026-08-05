@@ -8,8 +8,8 @@ def _result(*rows):
     return ExtractionResult(rows=list(rows), provider="pdfplumber", pdf_type="native", warnings=[], total_rows=len(rows))
 
 
-def _row(data, e1=None, s1=None, e2=None, s2=None):
-    return TimesheetRow(data=data, entrada_1=e1, saida_1=s1, entrada_2=e2, saida_2=s2, ocorrencia_raw=None, ocorrencia_tipo=None)
+def _row(data, *marcacoes):
+    return TimesheetRow(data=data, marcacoes=list(marcacoes), ocorrencia_raw=None, ocorrencia_tipo=None)
 
 
 def test_header_fixed_13_columns():
@@ -66,7 +66,7 @@ def test_gap_days_have_12_empty_fields():
 
 
 def test_occurrence_day_12_empty_fields():
-    row = TimesheetRow(data="05/03/2024", entrada_1=None, saida_1=None, entrada_2=None, saida_2=None, ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias")
+    row = TimesheetRow(data="05/03/2024", marcacoes=[], ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias")
     result = _result(_row("04/03/2024", "08:00", "17:00"), row)
     lines = build_csv(result).splitlines()
     ferias = lines[2]
@@ -92,3 +92,13 @@ def test_single_day_no_gaps():
     lines = build_csv(result).splitlines()
     assert len(lines) == 2
     assert lines[1].startswith("15/06/2023")
+
+
+def test_more_than_six_pairs_truncated_not_dropped_entirely():
+    marks = [f"{h:02d}:00" for h in range(7, 21)]  # 14 marks = 7 pairs
+    result = _result(_row("01/03/2024", *marks))
+    lines = build_csv(result).splitlines()
+    fields = lines[1].split(";")
+    assert fields[0] == "01/03/2024"
+    assert fields[1:] == marks[:12]
+    assert len(fields) == 13

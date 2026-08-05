@@ -25,24 +25,18 @@ GEMINI_RETRIES = 2
 
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
 Extract ALL timesheet rows from the provided document.
-Return a JSON array where each element has these fields (all optional, use null if absent):
+Return a JSON array where each element has these fields (all optional, use null/empty if absent):
 - "data": date in DD/MM/YYYY format
-- "entrada_1": first entry time in HH:MM format — ONLY from columns explicitly labelled "Entrada" or equivalent
-- "saida_1": first exit time in HH:MM format — ONLY from columns explicitly labelled "Saída" or equivalent
-- "entrada_2": second entry time in HH:MM format (after lunch break) — ONLY if a second "Entrada" column exists
-- "saida_2": second exit time in HH:MM format — ONLY if a second "Saída" column exists
+- "marcacoes": array of every clock-in/clock-out time for the day, in chronological order, HH:MM format — ONLY from columns explicitly labelled "Entrada"/"Saída" or equivalent. Include every pair found (there can be 1, 2, 3 or more) — never cap or drop any.
 - "ocorrencia_raw": occurrence/absence code exactly as written (e.g. "FERIAS", "FALTA", "DSR")
-IMPORTANT: columns labelled "Acréscimos", "Extras", "Adicional", "Intervalo", or similar are NOT entrada/saída — ignore them entirely.
+IMPORTANT: columns labelled "Acréscimos", "Extras", "Adicional", "Intervalo", "QTDE"/total hours, or similar are NOT entrada/saída marks — ignore them entirely, do not include them in "marcacoes".
 Include rows with absences or occurrences even if no times are present.
 Return ONLY the JSON array, no explanation, no markdown."""
 
 NORMALIZE_PROMPT = """You are a timesheet data parser. The following text is OCR output from a Brazilian labor timesheet document.
 Extract ALL timesheet rows and return a JSON array where each element has:
 - "data": date in DD/MM/YYYY format
-- "entrada_1": first entry time in HH:MM format (or null)
-- "saida_1": first exit time in HH:MM format (or null)
-- "entrada_2": second entry time in HH:MM (or null)
-- "saida_2": second exit time in HH:MM (or null)
+- "marcacoes": array of every clock-in/clock-out time for the day, in chronological order, HH:MM format (empty array if none). Include every pair found (there can be 1, 2, 3 or more) — never cap or drop any. Do not include totals/duration columns (e.g. "QTDE", "Adicional").
 - "ocorrencia_raw": occurrence code as written (or null)
 Include rows with occurrences even without times.
 Return ONLY the JSON array.
@@ -86,12 +80,12 @@ def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
     rows: list[TimesheetRow] = []
     for item in data:
         occ_raw, occ_tipo = normalize_ocorrencia(item.get("ocorrencia_raw") or "")
+        marcacoes = [
+            nt for t in (item.get("marcacoes") or []) if (nt := normalize_time(t or ""))
+        ]
         rows.append(TimesheetRow(
             data=normalize_date(item.get("data") or ""),
-            entrada_1=normalize_time(item.get("entrada_1") or ""),
-            saida_1=normalize_time(item.get("saida_1") or ""),
-            entrada_2=normalize_time(item.get("entrada_2") or ""),
-            saida_2=normalize_time(item.get("saida_2") or ""),
+            marcacoes=marcacoes,
             ocorrencia_raw=occ_raw,
             ocorrencia_tipo=occ_tipo,
         ))

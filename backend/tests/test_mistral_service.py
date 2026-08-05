@@ -37,7 +37,7 @@ def test_full_pipeline_success():
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    expected_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    expected_rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
 
     with patch("httpx.AsyncClient", return_value=mock_client), \
          patch("services.mistral_service.normalize_text_with_gemini", AsyncMock(return_value=expected_rows)):

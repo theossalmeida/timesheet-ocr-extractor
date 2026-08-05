@@ -40,21 +40,18 @@ def validate_row(row: TimesheetRow) -> list[str]:
         elif parsed.year < 2000:
             warnings.append(f"Ano implausível em {row.data}")
 
-    # Validate time consistency: saida > entrada
-    pairs = [
-        ("entrada_1", "saida_1"),
-        ("entrada_2", "saida_2"),
-    ]
-    for entrada_field, saida_field in pairs:
-        entrada = getattr(row, entrada_field)
-        saida = getattr(row, saida_field)
-        if entrada and saida:
-            e_min = _time_minutes(entrada)
-            s_min = _time_minutes(saida)
-            if e_min is not None and s_min is not None and s_min <= e_min:
-                warnings.append(
-                    f"{saida_field} ({saida}) antes ou igual a {entrada_field} ({entrada}) em {label}"
-                )
+    # Validate time consistency: saida > entrada, for every mark pair
+    marcacoes = row.marcacoes
+    for pair_num, (entrada, saida) in enumerate(
+        zip(marcacoes[0::2], marcacoes[1::2]), start=1
+    ):
+        e_min = _time_minutes(entrada)
+        s_min = _time_minutes(saida)
+        if e_min is not None and s_min is not None and s_min <= e_min:
+            warnings.append(
+                f"Saída {pair_num} ({saida}) antes ou igual a Entrada {pair_num} "
+                f"({entrada}) em {label}"
+            )
 
     return warnings
 

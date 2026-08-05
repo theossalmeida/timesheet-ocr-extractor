@@ -13,10 +13,7 @@ export type OcorrenciaTipo =
 
 export interface TimesheetRow {
   data: string | null;
-  entrada_1: string | null;
-  saida_1: string | null;
-  entrada_2: string | null;
-  saida_2: string | null;
+  marcacoes: string[];
   ocorrencia_raw: string | null;
   ocorrencia_tipo: OcorrenciaTipo | null;
 }

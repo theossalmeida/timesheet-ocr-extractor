@@ -8,9 +8,9 @@ from services.excel_builder import build_excel, OCORRENCIA_COLORS
 def _make_result(rows=None) -> ExtractionResult:
     if rows is None:
         rows = [
-            TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00"),
+            TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"]),
             TimesheetRow(data="04/03/2024", ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias"),
-            TimesheetRow(data="05/03/2024", entrada_1="08:00", saida_1="12:00", ocorrencia_tipo="meio_periodo"),
+            TimesheetRow(data="05/03/2024", marcacoes=["08:00", "12:00"], ocorrencia_tipo="meio_periodo"),
         ]
     return ExtractionResult(rows=rows, provider="tesseract", pdf_type="native")
 

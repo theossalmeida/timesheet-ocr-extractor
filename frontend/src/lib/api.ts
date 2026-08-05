@@ -38,6 +38,9 @@ export interface FrequencyBundleResult {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+// Skips ngrok's browser-warning interstitial when tunneling through it; ignored otherwise.
+const TUNNEL_HEADERS = { "ngrok-skip-browser-warning": "true" };
+
 function b64ToBlob(b64: string, mimeType: string): Blob {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return new Blob([bytes], { type: mimeType });
