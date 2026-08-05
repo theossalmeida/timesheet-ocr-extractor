@@ -150,8 +150,7 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     for date_str, times in sorted(grouped.items(), key=lambda kv: _date_sort_key(kv[0])):
         rows.append(TimesheetRow(
             data=date_str,
-            entrada_1=times["entrada"],
-            saida_1=times["saida"],
+            marcacoes=[t for t in (times["entrada"], times["saida"]) if t],
         ))
     return rows
 

@@ -64,6 +64,38 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Accessing from Another Computer (Tunnels)
+
+To reach both servers from another machine, run one tunnel per service (example uses [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), no account needed):
+
+```bash
+# 1. Backend running on :8000, then in a new terminal:
+cloudflared tunnel --url http://localhost:8000
+# -> copy the printed https://<backend-id>.trycloudflare.com URL
+```
+
+```bash
+# 2. Point the frontend at that backend URL, then start it:
+cd frontend
+echo "NEXT_PUBLIC_API_URL=https://<backend-id>.trycloudflare.com" > .env.local
+npm run dev
+```
+
+```bash
+# 3. Frontend running on :3000, then in a new terminal:
+cloudflared tunnel --url http://localhost:3000
+# -> share the printed https://<frontend-id>.trycloudflare.com URL
+```
+
+```env
+# backend/.env — allow the frontend tunnel to call the API
+CORS_ORIGINS=["https://<frontend-id>.trycloudflare.com"]
+```
+
+If the frontend tunnel keeps changing on every run, either set `CORS_ORIGINS=["*"]` (fine here, the API uses no cookies/credentials) or add `ALLOWED_DEV_ORIGINS=<frontend-id>.trycloudflare.com` to `frontend/.env.local` to silence Next.js's dev-server cross-origin warning for `/_next/*` assets.
+
+`NEXT_PUBLIC_API_URL` is baked in when the frontend dev server compiles, so restart `npm run dev` after changing it.
+
 ## Endpoints
 
 | Method | Route | Description |

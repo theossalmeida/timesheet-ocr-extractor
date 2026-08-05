@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import math
 from datetime import datetime
 
 import openpyxl
@@ -44,12 +45,39 @@ _WHITE_FILL = PatternFill("solid", fgColor="FFFFFF")
 _CENTER = Alignment(horizontal="center", vertical="center")
 _LEFT = Alignment(horizontal="left", vertical="center")
 
-HEADERS = ["Data", "Entrada 1", "Saída 1", "Entrada 2", "Saída 2", "Ocorrência", "Tipo"]
-COL_WIDTHS = [12, 10, 10, 10, 10, 22, 20]
+_MIN_MARK_PAIRS = 2
 
 
-def _apply_header(ws) -> None:
-    for col, (header, width) in enumerate(zip(HEADERS, COL_WIDTHS), start=1):
+def _marcacoes_column_count(rows: list[TimesheetRow]) -> int:
+    """Number of Entrada/Saída pair-columns the sheet needs.
+
+    Matches today's fixed 2-pair layout when no row has more marks than
+    that; grows automatically when a row has more (e.g. an overtime day
+    with a 3rd entrada/saída pair) instead of truncating any data.
+    """
+    max_marks = max((len(row.marcacoes) for row in rows), default=0)
+    return max(math.ceil(max_marks / 2), _MIN_MARK_PAIRS)
+
+
+def _build_headers(pair_count: int) -> tuple[list[str], list[int]]:
+    headers = ["Data"]
+    widths = [12]
+    for i in range(1, pair_count + 1):
+        headers += [f"Entrada {i}", f"Saída {i}"]
+        widths += [10, 10]
+    headers += ["Ocorrência", "Tipo"]
+    widths += [22, 20]
+    return headers, widths
+
+
+def _padded_marcacoes(row: TimesheetRow, pair_count: int) -> list[str | None]:
+    marks = list(row.marcacoes)
+    marks += [None] * (pair_count * 2 - len(marks))
+    return marks
+
+
+def _apply_header(ws, headers: list[str], widths: list[int]) -> None:
+    for col, (header, width) in enumerate(zip(headers, widths), start=1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = _HEADER_FONT
         cell.fill = _HEADER_FILL
@@ -86,7 +114,8 @@ def build_guia_excel(rows: list[TimesheetRow]) -> bytes:
     for i, row in enumerate(rows, start=1):
         excel_row = i + 1
         fill = _ALT_FILL if i % 2 == 0 else _WHITE_FILL
-        values = [row.data, row.entrada_1, row.saida_1]
+        marks = _padded_marcacoes(row, 1)
+        values = [row.data, marks[0], marks[1]]
         alignments = [_LEFT, _CENTER, _CENTER]
         for col, (val, align) in enumerate(zip(values, alignments), start=1):
             cell = ws.cell(row=excel_row, column=col, value=val)
@@ -105,21 +134,20 @@ def build_excel(result: ExtractionResult) -> bytes:
     # --- Tab 1: Registros de Ponto ---
     ws1 = wb.active
     ws1.title = "Registros de Ponto"
-    _apply_header(ws1)
+    pair_count = _marcacoes_column_count(result.rows)
+    headers, widths = _build_headers(pair_count)
+    _apply_header(ws1, headers, widths)
 
     for i, row in enumerate(result.rows, start=1):
         excel_row = i + 1
         fill = _row_fill(row, i)
         values = [
             row.data,
-            row.entrada_1,
-            row.saida_1,
-            row.entrada_2,
-            row.saida_2,
+            *_padded_marcacoes(row, pair_count),
             row.ocorrencia_raw,
             TIPO_LABELS.get(row.ocorrencia_tipo or "", "") if row.ocorrencia_tipo else "",
         ]
-        alignments = [_LEFT, _CENTER, _CENTER, _CENTER, _CENTER, _LEFT, _LEFT]
+        alignments = [_LEFT, *([_CENTER] * (pair_count * 2)), _LEFT, _LEFT]
         for col, (val, align) in enumerate(zip(values, alignments), start=1):
             cell = ws1.cell(row=excel_row, column=col, value=val)
             cell.fill = fill
@@ -129,7 +157,7 @@ def build_excel(result: ExtractionResult) -> bytes:
     # --- Tab 2: Resumo ---
     ws2 = wb.create_sheet("Resumo")
     dates = [r.data for r in result.rows if r.data]
-    trabalhados = sum(1 for r in result.rows if r.entrada_1)
+    trabalhados = sum(1 for r in result.rows if r.marcacoes)
 
     tipo_counts: dict[str, int] = {}
     for r in result.rows:

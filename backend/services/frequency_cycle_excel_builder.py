@@ -23,7 +23,10 @@ def build_frequency_cycle_excel(rows: list[ClassifiedDay], provider: str) -> byt
     ws = wb.active
     ws.title = "Ciclos"
 
-    headers = ["Data", "Dia", "Situacao", "Escala", "Marcadores PDF", "Pagina PDF"]
+    headers = [
+        "Data", "Dia", "Situacao", "Escala", "Marcadores PDF", "Pagina PDF",
+        "Preenchida por Aproximacao",
+    ]
     ws.append(headers)
 
     for col_idx in range(1, len(headers) + 1):
@@ -42,6 +45,7 @@ def build_frequency_cycle_excel(rows: list[ClassifiedDay], provider: str) -> byt
             item.scale,
             item.details,
             item.page,
+            "Sim" if item.ocr_corrected else "",
         ]
         for col_idx, value in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
@@ -55,7 +59,7 @@ def build_frequency_cycle_excel(rows: list[ClassifiedDay], provider: str) -> byt
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(ws.max_row, 1)}"
-    widths = [14, 8, 30, 10, 24, 10]
+    widths = [14, 8, 30, 10, 24, 10, 14]
     for col_idx, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
@@ -63,6 +67,10 @@ def build_frequency_cycle_excel(rows: list[ClassifiedDay], provider: str) -> byt
     summary.append(["Campo", "Valor"])
     summary.append(["Provider", provider])
     summary.append(["Dias classificados", len(rows)])
+    summary.append([
+        "Dias preenchidos por aproximacao",
+        sum(1 for row in rows if row.ocr_corrected),
+    ])
     if rows:
         summary.append(["Data inicial", rows[0].date.strftime("%d/%m/%Y")])
         summary.append(["Data final", rows[-1].date.strftime("%d/%m/%Y")])

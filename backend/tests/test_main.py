@@ -10,7 +10,7 @@ from models.timesheet import ExtractionResult, TimesheetRow
 client = TestClient(app)
 
 SAMPLE_ROWS = [
-    TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00"),
+    TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"]),
     TimesheetRow(data="04/03/2024", ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias"),
 ]
 
@@ -85,7 +85,7 @@ def test_extract_uses_pdfplumber_even_when_type_not_native():
 
 
 def test_extract_fallback_to_tesseract():
-    tesseract_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    tesseract_rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=None), \
@@ -99,7 +99,7 @@ def test_extract_fallback_to_tesseract():
 
 
 def test_extract_fallback_sends_scanned_pages_to_tesseract():
-    tesseract_rows = [TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00")]
+    tesseract_rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
     tesseract_mock = MagicMock(return_value=tesseract_rows)
     with patch("main.detect_pdf_type", return_value="native"), \
          patch("main.extract_with_pdfplumber", return_value=None), \

@@ -19,10 +19,7 @@ OcorrenciaTipo = Literal[
 
 class TimesheetRow(BaseModel):
     data: str | None = None
-    entrada_1: str | None = None
-    saida_1: str | None = None
-    entrada_2: str | None = None
-    saida_2: str | None = None
+    marcacoes: list[str] = []
     ocorrencia_raw: str | None = None
     ocorrencia_tipo: OcorrenciaTipo | None = None
     worker_name: str | None = None

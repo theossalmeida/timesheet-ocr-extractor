@@ -1,7 +1,14 @@
 /** @type {import('next').NextConfig} */
 const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
 
+// Comma-separated list of extra origins allowed to hit the dev server
+// (e.g. your tunnel's public URL, without protocol: "abc123.trycloudflare.com").
+const allowedDevOrigins = process.env.ALLOWED_DEV_ORIGINS
+  ? process.env.ALLOWED_DEV_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+  : undefined;
+
 const nextConfig = {
+  allowedDevOrigins,
   async rewrites() {
     return [
       {

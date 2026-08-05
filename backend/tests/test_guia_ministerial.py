@@ -70,8 +70,8 @@ def test_aggregate_single_record():
     rows = _aggregate(records)
     assert len(rows) == 1
     assert rows[0].data == "01/03/2024"
-    assert rows[0].entrada_1 == "08:00"
-    assert rows[0].saida_1 == "17:00"
+    assert rows[0].marcacoes[0] == "08:00"
+    assert rows[0].marcacoes[1] == "17:00"
 
 
 def test_aggregate_keeps_earliest_entrada():
@@ -81,7 +81,7 @@ def test_aggregate_keeps_earliest_entrada():
     ]
     rows = _aggregate(records)
     assert len(rows) == 1
-    assert rows[0].entrada_1 == "06:00"
+    assert rows[0].marcacoes[0] == "06:00"
 
 
 def test_aggregate_keeps_latest_saida():
@@ -91,7 +91,7 @@ def test_aggregate_keeps_latest_saida():
     ]
     rows = _aggregate(records)
     assert len(rows) == 1
-    assert rows[0].saida_1 == "20:30"
+    assert rows[0].marcacoes[1] == "20:30"
 
 
 def test_aggregate_same_date_merges_to_one_row():
@@ -101,8 +101,8 @@ def test_aggregate_same_date_merges_to_one_row():
     ]
     rows = _aggregate(records)
     assert len(rows) == 1
-    assert rows[0].entrada_1 == "06:00"
-    assert rows[0].saida_1 == "22:00"
+    assert rows[0].marcacoes[0] == "06:00"
+    assert rows[0].marcacoes[1] == "22:00"
 
 
 def test_aggregate_skips_invalid_date():
@@ -124,8 +124,8 @@ def test_aggregate_sorted_by_date():
 def test_aggregate_hhmm_time_format():
     records = [{"data": "01/03/2024", "entrada": "0800", "saida": "1700"}]
     rows = _aggregate(records)
-    assert rows[0].entrada_1 == "08:00"
-    assert rows[0].saida_1 == "17:00"
+    assert rows[0].marcacoes[0] == "08:00"
+    assert rows[0].marcacoes[1] == "17:00"
 
 
 # ── _extract_records_from_text (local OCR parser) ────────────────────────────

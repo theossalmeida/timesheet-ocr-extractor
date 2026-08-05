@@ -7,10 +7,7 @@ class TestValidateRow:
     def test_valid_row_no_warnings(self):
         row = TimesheetRow(
             data="05/03/2024",
-            entrada_1="08:00",
-            saida_1="12:00",
-            entrada_2="13:00",
-            saida_2="17:00",
+            marcacoes=["08:00", "12:00", "13:00", "17:00"],
         )
         warnings = validate_row(row)
         assert warnings == []
@@ -18,19 +15,17 @@ class TestValidateRow:
     def test_saida_before_entrada(self):
         row = TimesheetRow(
             data="05/03/2024",
-            entrada_1="08:00",
-            saida_1="07:00",
+            marcacoes=["08:00", "07:00"],
         )
         warnings = validate_row(row)
         assert len(warnings) == 1
-        assert "saida_1" in warnings[0]
+        assert "Saída 1" in warnings[0]
         assert "07:00" in warnings[0]
 
     def test_saida_equal_entrada(self):
         row = TimesheetRow(
             data="05/03/2024",
-            entrada_1="08:00",
-            saida_1="08:00",
+            marcacoes=["08:00", "08:00"],
         )
         warnings = validate_row(row)
         assert len(warnings) == 1
@@ -48,10 +43,7 @@ class TestValidateRow:
     def test_both_pairs_inconsistent(self):
         row = TimesheetRow(
             data="05/03/2024",
-            entrada_1="10:00",
-            saida_1="09:00",
-            entrada_2="15:00",
-            saida_2="14:00",
+            marcacoes=["10:00", "09:00", "15:00", "14:00"],
         )
         warnings = validate_row(row)
         assert len(warnings) == 2
@@ -68,22 +60,36 @@ class TestValidateRow:
     def test_second_pair_inconsistent(self):
         row = TimesheetRow(
             data="05/03/2024",
-            entrada_1="08:00",
-            saida_1="12:00",
-            entrada_2="15:00",
-            saida_2="14:00",
+            marcacoes=["08:00", "12:00", "15:00", "14:00"],
         )
         warnings = validate_row(row)
         assert len(warnings) == 1
-        assert "saida_2" in warnings[0]
+        assert "Saída 2" in warnings[0]
+
+    def test_third_pair_inconsistent(self):
+        row = TimesheetRow(
+            data="05/03/2024",
+            marcacoes=["08:00", "12:00", "13:00", "17:00", "19:00", "18:00"],
+        )
+        warnings = validate_row(row)
+        assert len(warnings) == 1
+        assert "Saída 3" in warnings[0]
+
+    def test_dangling_odd_mark_no_warning(self):
+        row = TimesheetRow(
+            data="05/03/2024",
+            marcacoes=["08:00", "12:00", "13:00"],
+        )
+        warnings = validate_row(row)
+        assert warnings == []
 
 
 class TestValidateResult:
     def test_duplicate_dates(self):
         rows = [
-            TimesheetRow(data="05/03/2024", entrada_1="08:00", saida_1="17:00"),
-            TimesheetRow(data="05/03/2024", entrada_1="08:00", saida_1="17:00"),
-            TimesheetRow(data="06/03/2024", entrada_1="08:00", saida_1="17:00"),
+            TimesheetRow(data="05/03/2024", marcacoes=["08:00", "17:00"]),
+            TimesheetRow(data="05/03/2024", marcacoes=["08:00", "17:00"]),
+            TimesheetRow(data="06/03/2024", marcacoes=["08:00", "17:00"]),
         ]
         warnings = validate_result(rows)
         assert any("duplicada" in w.lower() for w in warnings)
@@ -108,9 +114,9 @@ class TestValidateResult:
 
     def test_no_warnings_for_clean_data(self):
         rows = [
-            TimesheetRow(data="01/03/2024", entrada_1="08:00", saida_1="17:00"),
-            TimesheetRow(data="04/03/2024", entrada_1="08:00", saida_1="17:00"),
-            TimesheetRow(data="05/03/2024", entrada_1="08:00", saida_1="17:00"),
+            TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"]),
+            TimesheetRow(data="04/03/2024", marcacoes=["08:00", "17:00"]),
+            TimesheetRow(data="05/03/2024", marcacoes=["08:00", "17:00"]),
         ]
         warnings = validate_result(rows)
         assert warnings == []

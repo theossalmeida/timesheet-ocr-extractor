@@ -13,6 +13,7 @@ from services.frequency_cycle_service import (
     EMBARKED_START,
     WORK_ON_DAY_OFF,
     FrequencyDay,
+    _fuzzy_match_scale,
     classify_frequency_days,
     extract_frequency_days_hybrid,
     extract_frequency_days_pdfplumber,
@@ -109,6 +110,111 @@ def test_extracts_day_only_frequency_rows_from_new_petrobras_format():
     classified = classify_frequency_days(result)
     assert classified[1].situation == WORK_ON_DAY_OFF
     assert classified[2].situation == DAY_OFF
+
+
+def test_fuzzy_match_scale_recovers_single_character_misreads():
+    assert _fuzzy_match_scale("HOLG") == "FOLG"
+    assert _fuzzy_match_scale("MS02") == "HS02"
+    assert _fuzzy_match_scale("MT53") == "HT53"
+
+
+def test_fuzzy_match_scale_rejects_ambiguous_or_distant_tokens():
+    assert _fuzzy_match_scale("") is None
+    assert _fuzzy_match_scale("2025") is None
+    assert _fuzzy_match_scale("XYZQ") is None
+    # "H9" is equidistant from both HS and HT prefixes - must not guess.
+    assert _fuzzy_match_scale("H902") is None
+
+
+def test_recovers_day_only_row_with_misread_scale_token():
+    pdf = _mock_pdf_with_text(
+        """
+        RELATORIO DE ACOMPANHAMENTO DE FREQUENCIA
+        Periodo : 01.04.2021 a 30.04.2021
+        Dia ca lan P/A Obs Peso AF Regime
+        01 Q HT51 00:20 2021 +1,50 +8,10 05
+        13 T HOLG 12:00 **** -1,00 +23,60 05
+        """
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    assert [row.date for row in result] == [date(2021, 4, 1), date(2021, 4, 13)]
+    assert result[0].ocr_corrected is False
+    assert result[1].scale == "FOLG"
+    assert result[1].ocr_corrected is True
+
+
+def test_infers_missing_month_from_single_gap_in_document():
+    pdf = _mock_pdf_with_text(
+        """
+        Periodo : 01.01.2022 a 31.01.2022
+        01 Sab HS02 08:00
+        """,
+        """
+        Perlodo : XX.XX.XXXX
+        01 Ter HS02 08:00
+        02 Qua FOLG 2025
+        """,
+        """
+        Periodo : 01.03.2022 a 31.03.2022
+        01 Ter HS02 08:00
+        """,
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    february_rows = [row for row in result if row.date.month == 2]
+    assert [row.date for row in february_rows] == [date(2022, 2, 1), date(2022, 2, 2)]
+    assert all(row.ocr_corrected for row in february_rows)
+    assert [row.date for row in result] == [
+        date(2022, 1, 1),
+        date(2022, 2, 1),
+        date(2022, 2, 2),
+        date(2022, 3, 1),
+    ]
+
+
+def test_continuation_page_without_any_period_word_keeps_carried_over_month():
+    pdf = _mock_pdf_with_text(
+        """
+        Periodo : 01.01.2022 a 31.01.2022
+        01 Sab HS02 08:00
+        """,
+        """
+        02 Dom HS02 08:00
+        """,
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    assert [row.date for row in result] == [date(2022, 1, 1), date(2022, 1, 2)]
+    assert result[1].ocr_corrected is False
+
+
+def test_does_not_guess_month_when_gap_is_ambiguous():
+    pdf = _mock_pdf_with_text(
+        """
+        Periodo : 01.01.2022 a 31.01.2022
+        01 Sab HS02 08:00
+        """,
+        """
+        Perlodo : XX.XX.XXXX
+        01 Ter HS02 08:00
+        """,
+        """
+        Periodo : 01.04.2022 a 30.04.2022
+        01 Sex HS02 08:00
+        """,
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    assert [row.date for row in result] == [date(2022, 1, 1), date(2022, 4, 1)]
 
 
 def test_merge_frequency_days_prefers_pdfplumber_for_duplicate_dates():

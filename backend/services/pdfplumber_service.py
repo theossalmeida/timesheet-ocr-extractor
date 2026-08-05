@@ -33,6 +33,15 @@ _NOISE_RE = re.compile(
     r"\b(\d{2}:\d{2}|\d{3}|PRESE|PRESENTE)\b",
     re.IGNORECASE,
 )
+# Matches "Cartao de Ponto ES." rows: weekday before the date, 2-digit year,
+# e.g. "Sab 02/01/21 00307 466 19:02 22:32 ... Hora Extra 00:06 ..."
+_WEEKDAY_FIRST_ROW_RE = re.compile(
+    r"^(?:Seg|Ter|Qua|Qui|Sex|S[aá]b|Dom)\s+(\d{2})/(\d{2})/(\d{2})\s+(.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Leading Horario/Escala schedule codes right after the date - ignored.
+_SCHEDULE_CODE_RE = re.compile(r"^\d{3,6}$")
+_TIME_TOKEN_RE = re.compile(r"^\d{1,2}:\d{2}$")
 
 
 def _pdf_object_has_image(obj, depth: int = 0) -> bool:
@@ -96,10 +105,51 @@ def _parse_text_rows(full_text: str) -> list[TimesheetRow]:
             occ_raw, occ_tipo = None, None
         rows.append(TimesheetRow(
             data=normalized_date,
-            entrada_1=normalize_time(times[0]) if len(times) > 0 else None,
-            saida_1=normalize_time(times[1]) if len(times) > 1 else None,
-            entrada_2=None,
-            saida_2=None,
+            marcacoes=[nt for t in times if (nt := normalize_time(t))],
+            ocorrencia_raw=occ_raw,
+            ocorrencia_tipo=occ_tipo,
+        ))
+    return rows
+
+
+def _parse_weekday_first_rows(full_text: str) -> list[TimesheetRow]:
+    """Parse "Cartao de Ponto ES." rows, where the weekday comes before the
+    date and the year is 2 digits, followed by Horario/Escala schedule codes
+    (ignored) and then every entrada/saida mark for the day:
+
+        Sab 02/01/21 00307 466 19:02 22:32 00:31 07:00 07:00 07:06 Hora Extra 00:06 ...
+        Dom 03/01/21 466 FOLGA
+
+    All marks found are kept, however many there are - see marcacoes on
+    TimesheetRow.
+    """
+    rows: list[TimesheetRow] = []
+    for m in _WEEKDAY_FIRST_ROW_RE.finditer(full_text):
+        day, month, year, rest = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+        normalized_date = normalize_date(f"{day}/{month}/{year}")
+        if not normalized_date:
+            continue
+
+        tokens = rest.split()
+        i = 0
+        while i < len(tokens) and _SCHEDULE_CODE_RE.match(tokens[i]):
+            i += 1
+
+        marcacoes: list[str] = []
+        while i < len(tokens) and _TIME_TOKEN_RE.match(tokens[i]):
+            normalized_time = normalize_time(tokens[i])
+            if normalized_time:
+                marcacoes.append(normalized_time)
+            i += 1
+
+        occ_text = _NOISE_RE.sub("", " ".join(tokens[i:])).strip()
+        occ_raw, occ_tipo = normalize_ocorrencia(occ_text) if occ_text else (None, None)
+        if occ_tipo == "trabalho_normal":
+            occ_raw, occ_tipo = None, None
+
+        rows.append(TimesheetRow(
+            data=normalized_date,
+            marcacoes=marcacoes,
             ocorrencia_raw=occ_raw,
             ocorrencia_tipo=occ_tipo,
         ))
@@ -139,10 +189,7 @@ def _parse_multirow_cell(cell_text: str) -> list[TimesheetRow]:
         occ_raw, occ_tipo = normalize_ocorrencia(occ_text) if occ_text else (None, None)
         rows.append(TimesheetRow(
             data=normalized_date,
-            entrada_1=normalize_time(times[0]) if len(times) > 0 else None,
-            saida_1=normalize_time(times[1]) if len(times) > 1 else None,
-            entrada_2=normalize_time(times[2]) if len(times) > 2 else None,
-            saida_2=normalize_time(times[3]) if len(times) > 3 else None,
+            marcacoes=[nt for t in times if (nt := normalize_time(t))],
             ocorrencia_raw=occ_raw,
             ocorrencia_tipo=occ_tipo,
         ))
@@ -297,12 +344,15 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
                         return str(row[idx] or "").strip() or None
 
                     occ_raw, occ_tipo = normalize_ocorrencia(get(cols["occ"]) or "")
+                    marcacoes = [t for t in (
+                        normalize_time(get(cols["entry1"]) or ""),
+                        normalize_time(get(cols["exit1"]) or ""),
+                        normalize_time(get(cols["entry2"]) or ""),
+                        normalize_time(get(cols["exit2"]) or ""),
+                    ) if t]
                     all_rows.append(TimesheetRow(
                         data=normalized_date,
-                        entrada_1=normalize_time(get(cols["entry1"]) or ""),
-                        saida_1=normalize_time(get(cols["exit1"]) or ""),
-                        entrada_2=normalize_time(get(cols["entry2"]) or ""),
-                        saida_2=normalize_time(get(cols["exit2"]) or ""),
+                        marcacoes=marcacoes,
                         ocorrencia_raw=occ_raw,
                         ocorrencia_tipo=occ_tipo,
                     ))
@@ -329,13 +379,14 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
         if multirow_rows:
             return multirow_rows
 
-        # Fallback: plain text extraction (FOLHA DE PONTO fixed-width format)
+        # Fallback: plain text extraction (FOLHA DE PONTO fixed-width format,
+        # or "Cartao de Ponto ES." weekday-first format)
         pdf.close()
         pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
         full_text = "\n".join(
             (page.extract_text() or "") for page in pdf.pages
         )
-        text_rows = _parse_text_rows(full_text)
+        text_rows = _parse_text_rows(full_text) or _parse_weekday_first_rows(full_text)
         logger.info("pdfplumber: text fallback — rows=%d", len(text_rows))
         return text_rows if text_rows else None
     finally:

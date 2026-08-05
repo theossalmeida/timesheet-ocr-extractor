@@ -1,9 +1,16 @@
 from __future__ import annotations
+import logging
 from datetime import date, timedelta
 from models.timesheet import ExtractionResult, TimesheetRow
 
+logger = logging.getLogger(__name__)
+
+# PJeCalc's import format is a fixed external contract: exactly 6 entrada/
+# saída pairs (12 time columns) after the date. Unlike the Excel sheet, this
+# cannot grow — a day with more than 6 pairs gets truncated (see build_csv).
 _HEADER = "Data;Entrada1;Saída1;Entrada2;Saída2;Entrada3;Saída3;Entrada4;Saída4;Entrada5;Saída5;Entrada6;Saída6"
 _EMPTY_TIMES = ";" * 12  # 12 empty time fields after the date
+_CSV_MARK_SLOTS = 12
 
 
 def _parse_date(date_str: str) -> date | None:
@@ -35,20 +42,14 @@ def build_csv(result: ExtractionResult) -> str:
         row = row_map.get(date_str)
 
         if row is not None:
-            times = [
-                row.entrada_1 or "",
-                row.saida_1 or "",
-                row.entrada_2 or "",
-                row.saida_2 or "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-            ]
+            marks = row.marcacoes
+            if len(marks) > _CSV_MARK_SLOTS:
+                logger.warning(
+                    "csv_builder: %s has %d entrada/saida marks, PJeCalc format "
+                    "only supports %d - truncating extras: %s",
+                    date_str, len(marks), _CSV_MARK_SLOTS, marks[_CSV_MARK_SLOTS:],
+                )
+            times = marks[:_CSV_MARK_SLOTS] + [""] * max(0, _CSV_MARK_SLOTS - len(marks))
             lines.append(date_str + ";" + ";".join(times))
         else:
             lines.append(date_str + _EMPTY_TIMES)
