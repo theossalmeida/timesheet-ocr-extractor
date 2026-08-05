@@ -2,6 +2,7 @@
 .claude/
 CLAUDE_CODE_INSTRUCTIONS.md
 tasks/
+.codex-run/*
 
 # Environment variables
 .env

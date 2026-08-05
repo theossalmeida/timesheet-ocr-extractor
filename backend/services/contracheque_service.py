@@ -34,6 +34,20 @@ _COMPETENCIA_RE = re.compile(r"M.s/Ano\s*[\n\r]+\s*(\d{2}/\d{4})", re.IGNORECASE
 # Fallback: last MM/YYYY on the "Nome ... Matrícula ... MM/YYYY" row
 _COMP_FALLBACK_RE = re.compile(r"\d{6,7}\s+(\d{2}/\d{4})")
 
+# Companhia Docas do Rio de Janeiro PDFs use an embedded font whose line
+# endings are exposed by pdfminer as literal ``(cid:13)(cid:10)`` strings.  They
+# also omit the visible table headings from the extracted text, so this
+# layout cannot be parsed reliably as plain lines.  The fallback below uses
+# the word coordinates that remain correct in these PDFs.
+_CID_RE = re.compile(r"\(cid:\d+\)")
+_CDRJ_MARKER_RE = re.compile(r"COMPANHIA\s+DOCAS\s+DO\s+RIO\s+DE\s+JANEIRO", re.IGNORECASE)
+_DATE_RANGE_RE = re.compile(
+    r"(\d{2})/(\d{2})/(\d{2,4})\s+a\s+\d{2}/\d{2}/\d{2,4}",
+    re.IGNORECASE,
+)
+_CDRJ_CODE_RE = re.compile(r"\d{1,6}")
+_BRL_NUMBER_RE = re.compile(r"[\d.]+,\d{2}")
+
 
 # ── Currency helpers ──────────────────────────────────────────────────────────
 
@@ -130,6 +144,90 @@ def _extract_page_from_text(text: str, competencia: str | None = None) -> dict |
     return {"competencia": competencia, "itens": items}
 
 
+def _clean_pdf_word(value: object) -> str:
+    """Remove pdfminer's literal CID control markers from an extracted word."""
+    return _CID_RE.sub("", str(value or "")).strip()
+
+
+def _group_words_by_row(words: list[dict], tolerance: float = 2.0) -> list[list[dict]]:
+    """Group positioned PDF words that share approximately the same baseline."""
+    rows: list[list[dict]] = []
+    for word in sorted(words, key=lambda item: (float(item.get("top", 0)), float(item.get("x0", 0)))):
+        top = float(word.get("top", 0))
+        if not rows or abs(top - float(rows[-1][0].get("top", 0))) > tolerance:
+            rows.append([word])
+        else:
+            rows[-1].append(word)
+    return rows
+
+
+def _extract_page_cdrj_layout(page, text: str) -> dict | None:
+    """Extract earnings from Companhia Docas (CDRJ) coordinate-based payslips.
+
+    In this layout the columns are stable even though the embedded font makes
+    newlines and headings unusable.  Only the ``proventos`` column is read;
+    values in the rightmost ``descontos`` column are intentionally ignored,
+    matching the behaviour of the original contracheque parser.
+    """
+    clean_text = _CID_RE.sub(" ", text or "")
+    clean_text = re.sub(r"\s+", " ", clean_text)
+    if not _CDRJ_MARKER_RE.search(clean_text):
+        return None
+
+    period = _DATE_RANGE_RE.search(clean_text)
+    if not period:
+        return None
+
+    _day, month, year = period.groups()
+    if len(year) == 2:
+        year = f"20{year}"
+    competencia = f"{month}/{year}"
+
+    try:
+        words = page.extract_words() or []
+        width = float(page.width)
+    except Exception as e:
+        logger.warning("contracheque: failed reading CDRJ word positions: %s", e)
+        return None
+
+    items: list[dict] = []
+    for row in _group_words_by_row(words):
+        cleaned = [(word, _clean_pdf_word(word.get("text"))) for word in row]
+
+        codes = [
+            value for word, value in cleaned
+            if float(word.get("x1", 0)) <= width * 0.105 and _CDRJ_CODE_RE.fullmatch(value)
+        ]
+        if not codes:
+            continue
+
+        description_parts = [
+            value for word, value in cleaned
+            if width * 0.09 <= float(word.get("x0", 0)) < width * 0.44 and value
+        ]
+        description = " ".join(description_parts).strip()
+        if not description or not re.search(r"[A-Za-zÀ-ÿ]", description):
+            continue
+
+        earning_values = [
+            value for word, value in cleaned
+            if width * 0.56 <= float(word.get("x0", 0)) < width * 0.73
+            and _BRL_NUMBER_RE.fullmatch(value)
+        ]
+        if not earning_values:
+            # This row has only a discount in the rightmost column.
+            continue
+
+        valor = _parse_currency(earning_values[-1])
+        if valor is not None:
+            items.append({"descricao": description, "valor": valor})
+
+    # An empty list is still a successful parse for continuation pages that
+    # contain only discounts.  Returning it prevents needless OCR while the
+    # aggregator below deliberately ignores pages without earnings.
+    return {"competencia": competencia, "itens": items}
+
+
 def _extract_page_pdfplumber(page) -> dict | None:
     """
     Attempt to extract competência + salary items from a single pdfplumber Page.
@@ -156,7 +254,13 @@ def _extract_page_pdfplumber(page) -> dict | None:
 
     # 2. Extract salary items (and competência fallback) from plain text.
     text = page.extract_text() or ""
-    return _extract_page_from_text(text, competencia=competencia)
+    data = _extract_page_from_text(text, competencia=competencia)
+    if data:
+        return data
+
+    # Coordinate-based fallback for CDRJ payslips with obfuscated line
+    # endings and no extractable table headings.
+    return _extract_page_cdrj_layout(page, text)
 
 
 def _extract_all_pdfplumber(
@@ -286,7 +390,7 @@ def _aggregate_salary_data(
         competencia = page.get("competencia")
         itens = page.get("itens") or []
 
-        if not competencia:
+        if not competencia or not itens:
             continue
 
         match = re.match(r"^(\d{1,2})/(\d{4})$", str(competencia).strip())
