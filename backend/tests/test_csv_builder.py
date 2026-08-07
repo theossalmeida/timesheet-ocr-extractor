@@ -94,6 +94,32 @@ def test_single_day_no_gaps():
     assert lines[1].startswith("15/06/2023")
 
 
+def test_merges_contiguous_pjecalc_pairs():
+    result = _result(_row("01/03/2024", "07:00", "12:00", "12:00", "13:00"))
+    lines = build_csv(result).splitlines()
+    fields = lines[1].split(";")
+    assert fields[:5] == ["01/03/2024", "07:00", "13:00", "", ""]
+    assert len(fields) == 13
+
+
+def test_keeps_non_contiguous_pjecalc_pairs_separate():
+    result = _result(_row("01/03/2024", "07:00", "12:00", "13:00", "17:00"))
+    lines = build_csv(result).splitlines()
+    fields = lines[1].split(";")
+    assert fields[:6] == ["01/03/2024", "07:00", "12:00", "13:00", "17:00", ""]
+    assert len(fields) == 13
+
+
+def test_merges_chained_contiguous_pjecalc_pairs():
+    result = _result(
+        _row("01/03/2024", "07:00", "12:00", "12:00", "13:00", "13:00", "17:00")
+    )
+    lines = build_csv(result).splitlines()
+    fields = lines[1].split(";")
+    assert fields[:5] == ["01/03/2024", "07:00", "17:00", "", ""]
+    assert len(fields) == 13
+
+
 def test_more_than_six_pairs_truncated_not_dropped_entirely():
     marks = [f"{h:02d}:00" for h in range(7, 21)]  # 14 marks = 7 pairs
     result = _result(_row("01/03/2024", *marks))

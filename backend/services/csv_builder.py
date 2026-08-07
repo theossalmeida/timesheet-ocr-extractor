@@ -13,6 +13,28 @@ _EMPTY_TIMES = ";" * 12  # 12 empty time fields after the date
 _CSV_MARK_SLOTS = 12
 
 
+def _merge_contiguous_marks(marks: list[str]) -> list[str]:
+    merged: list[str] = []
+    i = 0
+
+    while i < len(marks):
+        entrada = marks[i]
+        if i + 1 >= len(marks):
+            merged.append(entrada)
+            break
+
+        saida = marks[i + 1]
+        next_pair = i + 2
+        while next_pair + 1 < len(marks) and saida == marks[next_pair]:
+            saida = marks[next_pair + 1]
+            next_pair += 2
+
+        merged.extend([entrada, saida])
+        i = next_pair
+
+    return merged
+
+
 def _parse_date(date_str: str) -> date | None:
     try:
         d, m, y = date_str.split("/")
@@ -42,7 +64,7 @@ def build_csv(result: ExtractionResult) -> str:
         row = row_map.get(date_str)
 
         if row is not None:
-            marks = row.marcacoes
+            marks = _merge_contiguous_marks(row.marcacoes)
             if len(marks) > _CSV_MARK_SLOTS:
                 logger.warning(
                     "csv_builder: %s has %d entrada/saida marks, PJeCalc format "
