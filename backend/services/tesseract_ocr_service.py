@@ -206,6 +206,7 @@ def extract_timesheet_rows_tesseract(pdf_bytes: bytes) -> list:
     from services.pdfplumber_service import (
         _MULTIROW_DATE_RE,
         _parse_multirow_cell,
+        _parse_peg_larg_rows,
         _parse_text_rows,
         _parse_weekday_first_rows,
     )
@@ -213,7 +214,11 @@ def extract_timesheet_rows_tesseract(pdf_bytes: bytes) -> list:
     page_texts = ocr_pdf_page_texts(pdf_bytes)
     full_text = "\n".join(text for _, text in page_texts)
 
-    rows = _parse_text_rows(full_text) or _parse_weekday_first_rows(full_text)
+    rows = (
+        _parse_peg_larg_rows(full_text)
+        or _parse_text_rows(full_text)
+        or _parse_weekday_first_rows(full_text)
+    )
     if rows:
         return rows
 

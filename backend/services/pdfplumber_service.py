@@ -43,6 +43,18 @@ _WEEKDAY_FIRST_ROW_RE = re.compile(
 _SCHEDULE_CODE_RE = re.compile(r"^\d{3,6}$")
 _TIME_TOKEN_RE = re.compile(r"^\d{1,2}:\d{2}$")
 
+# "Relatorio de Ponto para Assinatura" (Peg/Larg) prints one trip per line,
+# rather than one day per line.  The first two times after Lcto (X) are the
+# punch pair; all later times are calculated totals and must not be imported.
+_PEG_LARG_HEADER_RE = re.compile(r"\bPeg\b.*\bLar[-gq]\b", re.IGNORECASE)
+_PEG_LARG_ROW_RE = re.compile(
+    r"(?P<date>\d{2}/\d{2}/\d{4})\s+"
+    r"(?P<weekday>Seg|Ter|Qua|Qui|Sex|S[aá]b|Dom|Bom)\b"
+    r"(?P<prefix>.*?)\b(?P<status>FO|FC|[xX]{1,2})\b\s+"
+    r"(?P<peg>\d{1,2}:?\d{2})\s+(?P<larg>\d{1,2}:?\d{2})\b",
+    re.IGNORECASE,
+)
+
 
 def _pdf_object_has_image(obj, depth: int = 0) -> bool:
     if depth > 3:
@@ -154,6 +166,61 @@ def _parse_weekday_first_rows(full_text: str) -> list[TimesheetRow]:
             ocorrencia_tipo=occ_tipo,
         ))
     return rows
+
+
+def _parse_peg_larg_rows(full_text: str) -> list[TimesheetRow]:
+    """Parse and aggregate the Peg/Larg trip-per-line report format.
+
+    A workday can contain two or more lines.  Each line contributes exactly
+    its Peg and Larg values, in report order, to one daily TimesheetRow.
+    FO/FC lines describe days off; their printed 00:00 placeholders are not
+    punches.
+
+    At this report's small print size Tesseract sometimes reads a leading
+    ``1`` as ``4`` (for example 16/03 as 46/03).  Values 40..49 cannot be
+    calendar days, so they are safely repaired to 10..19 here.
+    """
+    if not _PEG_LARG_HEADER_RE.search(full_text):
+        return []
+
+    by_date: dict[str, TimesheetRow] = {}
+    for line in full_text.splitlines():
+        match = _PEG_LARG_ROW_RE.search(line)
+        if not match:
+            continue
+
+        date_str = match.group("date")
+        day, month, year = date_str.split("/")
+        if 40 <= int(day) <= 49:
+            day = str(int(day) - 30)
+            date_str = f"{day.zfill(2)}/{month}/{year}"
+        normalized_date = normalize_date(date_str)
+        if not normalized_date:
+            continue
+
+        status = match.group("status").upper()
+        row = by_date.get(normalized_date)
+        if row is None:
+            occurrence = "FOLGA COMPENSADA" if status == "FC" else "FOLGA" if status == "FO" else ""
+            occ_raw, occ_tipo = normalize_ocorrencia(occurrence)
+            row = TimesheetRow(
+                data=normalized_date,
+                marcacoes=[],
+                ocorrencia_raw=occ_raw,
+                ocorrencia_tipo=occ_tipo,
+            )
+            by_date[normalized_date] = row
+
+        if status not in {"FO", "FC"}:
+            for value in (match.group("peg"), match.group("larg")):
+                # Recover OCR's occasional missing separator (e.g. 1415).
+                if ":" not in value:
+                    value = f"{value[:-2]}:{value[-2:]}"
+                normalized = normalize_time(value)
+                if normalized:
+                    row.marcacoes.append(normalized)
+
+    return list(by_date.values())
 
 
 def _parse_multirow_cell(cell_text: str) -> list[TimesheetRow]:
@@ -386,7 +453,11 @@ def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
         full_text = "\n".join(
             (page.extract_text() or "") for page in pdf.pages
         )
-        text_rows = _parse_text_rows(full_text) or _parse_weekday_first_rows(full_text)
+        text_rows = (
+            _parse_peg_larg_rows(full_text)
+            or _parse_text_rows(full_text)
+            or _parse_weekday_first_rows(full_text)
+        )
         logger.info("pdfplumber: text fallback — rows=%d", len(text_rows))
         return text_rows if text_rows else None
     finally:
