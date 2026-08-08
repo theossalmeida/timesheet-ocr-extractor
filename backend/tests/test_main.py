@@ -1,7 +1,7 @@
 import io
 import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
@@ -117,7 +117,8 @@ def test_extract_tesseract_fail_returns_422():
     with patch("main.detect_pdf_type", return_value="scanned"), \
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=None), \
-         patch("main._run_tesseract_timesheet", return_value=[]):
+         patch("main._run_tesseract_timesheet", return_value=[]), \
+         patch("main._run_local_vision_timesheet", new=AsyncMock(return_value=[])):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
@@ -175,3 +176,19 @@ def test_extract_frequencia_success_returns_excel_bundle():
     assert '"excel_filename":"frequencia_frequencia.xlsx"' in r.text
     assert '"rows_extracted":1' in r.text
     assert '"provider":"pdfplumber"' in r.text
+
+
+def test_extract_fallback_to_local_vision_when_tesseract_returns_no_rows():
+    vision_rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
+    with patch("main.detect_pdf_type", return_value="scanned"), \
+         patch("main.extract_with_pdfplumber", return_value=None), \
+         patch("main.get_scanned_page_bytes", return_value=None), \
+         patch("main._run_tesseract_timesheet", return_value=[]), \
+         patch("main._run_local_vision_timesheet", new=AsyncMock(return_value=vision_rows)), \
+         patch("main.build_excel", return_value=b"PKfake"):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
+
+    assert r.status_code == 200
+    assert r.headers["x-provider-used"] == "local-vision"
+    assert r.json()["rows_extracted"] == 1

@@ -22,6 +22,11 @@ from services.frequency_cycle_service import (
     stream_frequency_cycle_extraction,
 )
 from services.guia_ministerial_service import stream_guia_extraction
+from services.local_vision_ocr_service import (
+    LocalVisionOCRError,
+    extract_timesheet_rows_local_vision,
+    is_local_vision_ocr_configured,
+)
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from services.tesseract_ocr_service import (
@@ -117,12 +122,36 @@ def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
         return []
 
 
-async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
-    """Run extraction pipeline: pdfplumber -> local Tesseract OCR. Returns (result, provider).
 
-    No external API is used. Tesseract runs locally over rendered page
-    images for anything pdfplumber could not read (scanned pages or pages
-    with an obfuscated/"encrypted" font encoding).
+async def _run_local_vision_timesheet(pdf_bytes: bytes) -> list:
+    """Run the optional local vision-model fallback.
+
+    This is best-effort: unavailable Tailscale host, model mismatch, invalid
+    JSON, or unreadable pages all collapse to [] so the caller can return the
+    normal 422 when nothing is extracted.
+    """
+    if not is_local_vision_ocr_configured():
+        logger.debug("Local vision OCR is not configured, skipping")
+        return []
+    try:
+        rows = await extract_timesheet_rows_local_vision(pdf_bytes)
+        if rows:
+            logger.info("Local vision OCR extracted %d row(s)", len(rows))
+        return rows
+    except LocalVisionOCRError as e:
+        logger.warning("Local vision OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("Local vision OCR raised unexpected error: %s", e)
+        return []
+
+async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
+    """Run extraction pipeline: pdfplumber -> Tesseract -> optional local vision OCR. Returns (result, provider).
+
+    Tesseract runs locally over rendered page images for anything pdfplumber
+    could not read. If Tesseract returns no rows and LOCAL_VISION_OCR_BASE_URL
+    is configured, an Ollama-compatible vision model is used as a final
+    best-effort fallback.
     """
     pdf_type = detect_pdf_type(pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
@@ -147,12 +176,22 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
                 provider = "pdfplumber+tesseract"
                 rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
                 logger.info("Hybrid merge — total rows=%d", len(rows))
+            else:
+                extra_rows = await _run_local_vision_timesheet(scanned_bytes)
+                if extra_rows:
+                    provider = "pdfplumber+local-vision"
+                    rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                    logger.info("Hybrid local-vision merge - total rows=%d", len(rows))
 
     if not rows:
         tesseract_bytes = get_scanned_page_bytes(pdf_bytes) or pdf_bytes
         rows = await asyncio.to_thread(_run_tesseract_timesheet, tesseract_bytes)
         if rows:
             provider = "tesseract"
+        else:
+            rows = await _run_local_vision_timesheet(tesseract_bytes)
+            if rows:
+                provider = "local-vision"
 
     if not rows:
         raise HTTPException(

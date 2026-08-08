@@ -117,6 +117,32 @@ def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
     return records
 
 
+
+async def _process_chunk_local_vision(chunk_bytes: bytes) -> list[dict]:
+    """Use the optional local vision model when Tesseract finds no records."""
+    try:
+        from services.local_vision_ocr_service import (
+            LocalVisionOCRError,
+            extract_guia_records_local_vision,
+            is_local_vision_ocr_configured,
+        )
+    except ImportError as e:
+        logger.debug("guia: local vision OCR dependencies not installed: %s", e)
+        return []
+
+    if not is_local_vision_ocr_configured():
+        logger.debug("guia: local vision OCR is not configured, skipping")
+        return []
+
+    try:
+        return await extract_guia_records_local_vision(chunk_bytes)
+    except LocalVisionOCRError as e:
+        logger.warning("guia: local vision OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("guia: local vision OCR raised unexpected error: %s", e)
+        return []
+
 def _date_sort_key(date_str: str) -> tuple[int, int, int]:
     try:
         d, m, y = date_str.split("/")
@@ -166,6 +192,8 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
         chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
         total = len(chunks)
         all_records: list[dict] = []
+        used_tesseract = False
+        used_local_vision = False
 
         for i, chunk in enumerate(chunks):
             yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total}...'})}\n\n"
@@ -175,7 +203,20 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                 yield ": keep-alive\n\n"
                 await asyncio.sleep(15)
 
-            all_records.extend(task.result())
+            records = task.result()
+            if records:
+                used_tesseract = True
+            else:
+                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'local-vision', 'message': f'OCR com IA local: processando parte {i + 1} de {total}...'})}\n\n"
+                vision_task = asyncio.create_task(_process_chunk_local_vision(chunk))
+                while not vision_task.done():
+                    yield ": keep-alive\n\n"
+                    await asyncio.sleep(15)
+                records = vision_task.result()
+                if records:
+                    used_local_vision = True
+
+            all_records.extend(records)
 
         rows = _aggregate(all_records)
 
@@ -186,6 +227,9 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
         excel_bytes = build_guia_excel(rows)
         csv_bytes, csv_mime = build_guia_csv(rows)
         csv_ext = "zip" if csv_mime == "application/zip" else "csv"
+        provider = "local-vision-guia" if used_local_vision else "tesseract-guia"
+        if used_tesseract and used_local_vision:
+            provider = "tesseract-guia+local-vision"
 
         yield "data: " + _json.dumps({
             "type": "done",
@@ -195,7 +239,7 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
             "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
             "csv_mime": csv_mime,
             "rows_extracted": len(rows),
-            "provider": "tesseract-guia",
+            "provider": provider,
         }, ensure_ascii=False) + "\n\n"
 
     except Exception as e:
@@ -214,6 +258,9 @@ async def extract_with_guia_ministerial(
     for i, chunk in enumerate(chunks):
         logger.info("guia: processing chunk %d/%d — %d bytes", i + 1, len(chunks), len(chunk))
         records = await asyncio.to_thread(_process_chunk_tesseract, chunk)
+        if not records:
+            logger.info("guia: chunk %d had no Tesseract records; trying local vision OCR", i + 1)
+            records = await _process_chunk_local_vision(chunk)
         logger.info("guia: chunk %d → %d records", i + 1, len(records))
         all_records.extend(records)
 

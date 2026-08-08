@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import io
 import pypdf
 import pytest
@@ -203,3 +203,20 @@ async def test_extract_merges_chunks():
     assert len(rows) == 2
     assert rows[0].data == "01/03/2024"
     assert rows[1].data == "02/03/2024"
+
+@pytest.mark.anyio
+async def test_extract_falls_back_to_local_vision_when_tesseract_empty():
+    pdf = _make_minimal_pdf(1)
+    mock_records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+
+    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
+         patch(
+             "services.guia_ministerial_service._process_chunk_local_vision",
+             new=AsyncMock(return_value=mock_records),
+         ) as vision_mock:
+        rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
+
+    vision_mock.assert_awaited_once()
+    assert len(rows) == 1
+    assert rows[0].data == "01/03/2024"
+    assert rows[0].marcacoes == ["08:00", "17:00"]

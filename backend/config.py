@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     # machines. Leave empty to rely on PATH resolution (the default in Docker/
     # Fly.io, where apt-get installs it onto PATH already).
     TESSERACT_CMD: str = ""
+    # Optional local vision-model fallback for scanned/handwritten pages that
+    # Tesseract cannot read. Expected to be an Ollama-compatible server, e.g.
+    # http://100.79.108.26:11434 on the user's Tailscale network.
+    LOCAL_VISION_OCR_BASE_URL: str = ""
+    LOCAL_VISION_OCR_MODEL: str = "qwen2.5vl:7b"
+    LOCAL_VISION_OCR_TIMEOUT_SECONDS: float = 120.0
+    LOCAL_VISION_OCR_DPI: int = 160
     ENVIRONMENT: str = "development"
     MAX_FILE_SIZE_MB: int = 50
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
