@@ -20,12 +20,12 @@ CHUNK_SIZE = 20  # pages per local-OCR request (keeps progress updates granular)
 # labels semantically, the local OCR path instead falls back to a simpler
 # (and more limited) heuristic: for every date found on a line, take every
 # HH:MM-shaped time on that same line and use the earliest as entrada and the
-# latest as saída — mirroring the old "always earliest=entrada, latest=saida"
+# latest as saída - mirroring the old "always earliest=entrada, latest=saida"
 # aggregation rule, just without label awareness.
 #
 # IMPORTANT LIMITATION: many real Guia Ministerial forms are filled out by
 # hand. Tesseract is a printed-text OCR engine and does not reliably read
-# handwriting — this path works reasonably well for typed/printed guias, but
+# handwriting - this path works reasonably well for typed/printed guias, but
 # will likely miss or misread handwritten ones. There is no local, free
 # equivalent to a handwriting-capable vision model; this trade-off should be
 # revisited if handwritten guias are common in practice.
@@ -79,7 +79,7 @@ def _extract_records_from_text(text: str) -> list[dict]:
 
 def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
     """OCR a PDF chunk locally with Tesseract and extract raw records.
-    Never raises — returns [] when Tesseract is unavailable, the bytes
+    Never raises - returns [] when Tesseract is unavailable, the bytes
     aren't a renderable PDF, or no page yields a match.
     """
     try:
@@ -110,7 +110,7 @@ def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
         page_records = _extract_records_from_text(text)
         if page_records:
             logger.info(
-                "guia: Tesseract OCR — page %d found %d record(s)",
+                "guia: Tesseract OCR - page %d found %d record(s)",
                 page_index, len(page_records),
             )
         records.extend(page_records)
@@ -164,7 +164,12 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
         saida = normalize_time(str(rec.get("saida") or ""))
 
         if date_str not in grouped:
-            grouped[date_str] = {"entrada": entrada, "saida": saida}
+            grouped[date_str] = {
+                "entrada": entrada,
+                "saida": saida,
+                "ocr_confidence": rec.get("_confidence"),
+                "ocr_warning": rec.get("_ocr_warning"),
+            }
         else:
             existing = grouped[date_str]
             if entrada and (not existing["entrada"] or entrada < existing["entrada"]):
@@ -177,6 +182,8 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
         rows.append(TimesheetRow(
             data=date_str,
             marcacoes=[t for t in (times["entrada"], times["saida"]) if t],
+            ocr_confidence=times.get("ocr_confidence"),
+            ocr_warning=times.get("ocr_warning"),
         ))
     return rows
 
@@ -243,27 +250,27 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
         }, ensure_ascii=False) + "\n\n"
 
     except Exception as e:
-        logger.exception("guia stream: unexpected error — %s", e)
+        logger.exception("guia stream: unexpected error - %s", e)
         yield f"data: {_json.dumps({'type': 'error', 'message': 'Erro interno ao processar guias ministeriais.'})}\n\n"
 
 
 async def extract_with_guia_ministerial(
     pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE
 ) -> list[TimesheetRow]:
-    logger.info("guia: starting extraction — pdf_size=%d bytes", len(pdf_bytes))
+    logger.info("guia: starting extraction - pdf_size=%d bytes", len(pdf_bytes))
     chunks = _split_pdf_chunks(pdf_bytes, chunk_size=chunk_size)
     logger.info("guia: split into %d chunks of up to %d pages", len(chunks), chunk_size)
 
     all_records: list[dict] = []
     for i, chunk in enumerate(chunks):
-        logger.info("guia: processing chunk %d/%d — %d bytes", i + 1, len(chunks), len(chunk))
+        logger.info("guia: processing chunk %d/%d - %d bytes", i + 1, len(chunks), len(chunk))
         records = await asyncio.to_thread(_process_chunk_tesseract, chunk)
         if not records:
             logger.info("guia: chunk %d had no Tesseract records; trying local vision OCR", i + 1)
             records = await _process_chunk_local_vision(chunk)
-        logger.info("guia: chunk %d → %d records", i + 1, len(records))
+        logger.info("guia: chunk %d -> %d records", i + 1, len(records))
         all_records.extend(records)
 
     rows = _aggregate(all_records)
-    logger.info("guia: done — total_rows=%d", len(rows))
+    logger.info("guia: done - total_rows=%d", len(rows))
     return rows

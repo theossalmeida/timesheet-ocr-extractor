@@ -9,6 +9,7 @@ from services.gemini_service import (
     extract_with_gemini,
     extract_with_gemini_adaptive,
     normalize_text_with_gemini,
+    _gemini_url,
 )
 
 
@@ -25,6 +26,14 @@ def _mock_response(status: int, data: list[dict]) -> MagicMock:
     }
     response.text = text_content
     return response
+
+
+@pytest.fixture(autouse=True)
+def configure_gemini(monkeypatch):
+    from services import gemini_service as service
+
+    monkeypatch.setattr(service.settings, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 
 def _mock_error_response(status: int, text: str = "error") -> MagicMock:
@@ -176,3 +185,39 @@ def test_adaptive_extract_retries_failed_chunk_as_single_pages():
     assert gemini_mock.await_args_list[1].args == (b"page-1",)
     assert gemini_mock.await_args_list[2].args == (b"page-2",)
     assert result == rows
+
+def test_extract_parses_records_payload():
+    response = MagicMock()
+    response.status_code = 200
+    response.text = '{"records": []}'
+    response.json.return_value = {
+        "candidates": [{
+            "content": {
+                "parts": [{"text": json.dumps({
+                    "records": [
+                        {"data": "08/08/2022", "entrada": "13:30", "saida": "23:02", "confidence": "high"},
+                    ]
+                })}]
+            }
+        }]
+    }
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        rows = asyncio.run(extract_with_gemini(b"fake pdf"))
+
+    assert len(rows) == 1
+    assert rows[0].data == "08/08/2022"
+    assert rows[0].marcacoes == ["13:30", "23:02"]
+    assert rows[0].ocr_confidence == "high"
+
+
+def test_gemini_url_uses_configured_model(monkeypatch):
+    from services import gemini_service as service
+
+    monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-custom")
+
+    assert _gemini_url().endswith("/models/gemini-custom:generateContent")

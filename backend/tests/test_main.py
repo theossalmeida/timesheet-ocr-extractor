@@ -9,6 +9,15 @@ from models.timesheet import ExtractionResult, TimesheetRow
 
 client = TestClient(app)
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    try:
+        app.state.limiter._limiter.storage.reset()
+    except AttributeError:
+        pass
+    yield
+
+
 SAMPLE_ROWS = [
     TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"]),
     TimesheetRow(data="04/03/2024", ocorrencia_raw="FERIAS", ocorrencia_tipo="ferias"),
@@ -35,7 +44,7 @@ def test_extract_invalid_magic_bytes():
     data = io.BytesIO(b"not a pdf content here")
     r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
     assert r.status_code == 400
-    assert "inválido" in r.json()["error"].lower()
+    assert "invalido" in r.json()["error"].lower()
 
 
 def test_extract_file_too_large():
@@ -118,6 +127,7 @@ def test_extract_tesseract_fail_returns_422():
          patch("main.extract_with_pdfplumber", return_value=None), \
          patch("main.get_scanned_page_bytes", return_value=None), \
          patch("main._run_tesseract_timesheet", return_value=[]), \
+         patch("main._run_gemini_timesheet", new=AsyncMock(return_value=[])), \
          patch("main._run_local_vision_timesheet", new=AsyncMock(return_value=[])):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
@@ -192,3 +202,39 @@ def test_extract_fallback_to_local_vision_when_tesseract_returns_no_rows():
     assert r.status_code == 200
     assert r.headers["x-provider-used"] == "local-vision"
     assert r.json()["rows_extracted"] == 1
+
+
+def test_extract_fallback_to_gemini_for_scanned_pages_when_tesseract_returns_no_rows():
+    gemini_rows = [TimesheetRow(data="08/08/2022", marcacoes=["13:30", "23:02"])]
+    gemini_mock = AsyncMock(return_value=gemini_rows)
+    local_vision_mock = AsyncMock(return_value=[])
+    with patch("main.detect_pdf_type", return_value="scanned"), \
+         patch("main.extract_with_pdfplumber", return_value=None), \
+         patch("main.get_scanned_page_bytes", return_value=b"scanned-pages"), \
+         patch("main._run_tesseract_timesheet", return_value=[]), \
+         patch("main._run_gemini_timesheet", new=gemini_mock), \
+         patch("main._run_local_vision_timesheet", new=local_vision_mock), \
+         patch("main.build_excel", return_value=b"PKfake"):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
+
+    assert r.status_code == 200
+    assert r.headers["x-provider-used"] == "gemini"
+    assert r.json()["rows_extracted"] == 1
+    gemini_mock.assert_awaited_once_with(b"scanned-pages")
+    local_vision_mock.assert_not_awaited()
+
+
+def test_extract_does_not_send_native_pdf_to_gemini_when_no_scanned_pages():
+    gemini_mock = AsyncMock(return_value=[])
+    with patch("main.detect_pdf_type", return_value="native"), \
+         patch("main.extract_with_pdfplumber", return_value=None), \
+         patch("main.get_scanned_page_bytes", return_value=None), \
+         patch("main._run_tesseract_timesheet", return_value=[]), \
+         patch("main._run_gemini_timesheet", new=gemini_mock), \
+         patch("main._run_local_vision_timesheet", new=AsyncMock(return_value=[])):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
+
+    assert r.status_code == 422
+    gemini_mock.assert_awaited_once_with(None)

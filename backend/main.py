@@ -21,8 +21,14 @@ from services.contracheque_service import stream_contracheque_extraction
 from services.frequency_cycle_service import (
     stream_frequency_cycle_extraction,
 )
+from services.gemini_service import (
+    GeminiExtractionError,
+    extract_with_gemini_adaptive,
+    is_gemini_configured,
+)
 from services.guia_ministerial_service import stream_guia_extraction
 from services.local_vision_ocr_service import (
+    LocalVisionConnectionError,
     LocalVisionOCRError,
     extract_timesheet_rows_local_vision,
     is_local_vision_ocr_configured,
@@ -35,6 +41,7 @@ from services.tesseract_ocr_service import (
     is_tesseract_available,
 )
 from utils.validators import validate_result, validate_row
+
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -81,12 +88,12 @@ def _validate_pdf(file_bytes: bytes, size_bytes: int, max_mb: int | None = None)
     if size_bytes > limit:
         raise HTTPException(
             status_code=413,
-            detail=f"Arquivo muito grande. Máximo permitido: {max_mb or settings.MAX_FILE_SIZE_MB}MB.",
+            detail=f"Arquivo muito grande. Maximo permitido: {max_mb or settings.MAX_FILE_SIZE_MB}MB.",
         )
     if not file_bytes[:4] == b"%PDF":
         raise HTTPException(
             status_code=400,
-            detail="Arquivo inválido. Apenas PDFs são aceitos.",
+            detail="Arquivo invalido. Apenas PDFs sao aceitos.",
         )
 
 
@@ -103,7 +110,7 @@ def _sort_key(date_str: str | None) -> tuple[int, int, int]:
 
 def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
     """Run local Tesseract OCR extraction for the generic timesheet format,
-    never raising — an empty list means "could not be read locally"
+    never raising â€” an empty list means "could not be read locally"
     (Tesseract not installed, unrenderable bytes, or no rows matched).
     """
     if not is_tesseract_available():
@@ -123,13 +130,36 @@ def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
 
 
 
-async def _run_local_vision_timesheet(pdf_bytes: bytes) -> list:
+async def _run_gemini_timesheet(scanned_pdf_bytes: bytes | None) -> list:
+    """Run Gemini only for scanned/image-only PDF pages."""
+    if not scanned_pdf_bytes:
+        logger.debug("Gemini OCR skipped: no scanned/image-only pages")
+        return []
+    if not is_gemini_configured():
+        logger.debug("Gemini OCR is not configured, skipping")
+        return []
+    try:
+        rows = await extract_with_gemini_adaptive(scanned_pdf_bytes)
+        if rows:
+            logger.info("Gemini OCR extracted %d row(s)", len(rows))
+        return rows
+    except GeminiExtractionError as e:
+        logger.warning("Gemini OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("Gemini OCR raised unexpected error: %s", e)
+        return []
+
+async def _run_local_vision_timesheet(pdf_bytes: bytes | None) -> list:
     """Run the optional local vision-model fallback.
 
     This is best-effort: unavailable Tailscale host, model mismatch, invalid
     JSON, or unreadable pages all collapse to [] so the caller can return the
     normal 422 when nothing is extracted.
     """
+    if not pdf_bytes:
+        logger.debug("Local vision OCR skipped: no scanned/image-only pages")
+        return []
     if not is_local_vision_ocr_configured():
         logger.debug("Local vision OCR is not configured, skipping")
         return []
@@ -138,6 +168,9 @@ async def _run_local_vision_timesheet(pdf_bytes: bytes) -> list:
         if rows:
             logger.info("Local vision OCR extracted %d row(s)", len(rows))
         return rows
+    except LocalVisionConnectionError as e:
+        logger.warning("Local vision OCR connection failed: %s", e)
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except LocalVisionOCRError as e:
         logger.warning("Local vision OCR failed: %s", e)
         return []
@@ -146,19 +179,18 @@ async def _run_local_vision_timesheet(pdf_bytes: bytes) -> list:
         return []
 
 async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
-    """Run extraction pipeline: pdfplumber -> Tesseract -> optional local vision OCR. Returns (result, provider).
+    """Run extraction pipeline: pdfplumber -> Tesseract -> Gemini/local vision OCR. Returns (result, provider).
 
     Tesseract runs locally over rendered page images for anything pdfplumber
-    could not read. If Tesseract returns no rows and LOCAL_VISION_OCR_BASE_URL
-    is configured, an Ollama-compatible vision model is used as a final
-    best-effort fallback.
+    could not read. Gemini is used only for scanned/image-only PDF pages
+    after local extraction fails.
     """
     pdf_type = detect_pdf_type(pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
 
     provider = "pdfplumber"
 
-    # Always attempt local extraction first — detect_pdf_type is only a hint and
+    # Always attempt local extraction first â€” detect_pdf_type is only a hint and
     # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
     # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
     # OCR is the fallback, only reached when pdfplumber yields nothing for a page.
@@ -170,28 +202,39 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
         scanned_bytes = get_scanned_page_bytes(pdf_bytes)
         if scanned_bytes:
             pdf_type = "mixed"
-            logger.info("Hybrid PDF: found scanned pages — running local Tesseract OCR")
+            logger.info("Hybrid PDF: found scanned pages â€” running local Tesseract OCR")
             extra_rows = await asyncio.to_thread(_run_tesseract_timesheet, scanned_bytes)
             if extra_rows:
                 provider = "pdfplumber+tesseract"
                 rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                logger.info("Hybrid merge — total rows=%d", len(rows))
+                logger.info("Hybrid merge â€” total rows=%d", len(rows))
             else:
-                extra_rows = await _run_local_vision_timesheet(scanned_bytes)
+                extra_rows = await _run_gemini_timesheet(scanned_bytes)
                 if extra_rows:
-                    provider = "pdfplumber+local-vision"
+                    provider = "pdfplumber+gemini"
                     rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                    logger.info("Hybrid local-vision merge - total rows=%d", len(rows))
+                    logger.info("Hybrid Gemini merge - total rows=%d", len(rows))
+                else:
+                    extra_rows = await _run_local_vision_timesheet(scanned_bytes)
+                    if extra_rows:
+                        provider = "pdfplumber+local-vision"
+                        rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
+                        logger.info("Hybrid local-vision merge - total rows=%d", len(rows))
 
     if not rows:
-        tesseract_bytes = get_scanned_page_bytes(pdf_bytes) or pdf_bytes
+        scanned_bytes = get_scanned_page_bytes(pdf_bytes)
+        tesseract_bytes = scanned_bytes or pdf_bytes
         rows = await asyncio.to_thread(_run_tesseract_timesheet, tesseract_bytes)
         if rows:
             provider = "tesseract"
         else:
-            rows = await _run_local_vision_timesheet(tesseract_bytes)
+            rows = await _run_gemini_timesheet(scanned_bytes)
             if rows:
-                provider = "local-vision"
+                provider = "gemini"
+            else:
+                rows = await _run_local_vision_timesheet(scanned_bytes)
+                if rows:
+                    provider = "local-vision"
 
     if not rows:
         raise HTTPException(
@@ -205,7 +248,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     result_warnings = validate_result(rows)
 
     logger.info(
-        "Extraction complete — provider=%s rows=%d pdf_type=%s warnings=%d",
+        "Extraction complete â€” provider=%s rows=%d pdf_type=%s warnings=%d",
         provider,
         len(rows),
         pdf_type,
@@ -232,7 +275,7 @@ async def health():
 async def extract(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /extract — filename=%s size=%d bytes",
+        "POST /extract â€” filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
@@ -268,7 +311,7 @@ async def extract(request: Request, file: UploadFile = File(...)):
 async def extract_guia(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /extract/guia — filename=%s size=%d bytes",
+        "POST /extract/guia â€” filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
@@ -316,7 +359,7 @@ async def extract_frequencia(request: Request, file: UploadFile = File(...)):
 async def extract_contracheque(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /contracheque — filename=%s size=%d bytes",
+        "POST /contracheque â€” filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
@@ -364,7 +407,7 @@ async def extract_contracheque_horas_extras(request: Request, file: UploadFile =
 async def preview(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /preview — filename=%s size=%d bytes",
+        "POST /preview â€” filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )

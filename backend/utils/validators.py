@@ -32,6 +32,9 @@ def validate_row(row: TimesheetRow) -> list[str]:
     warnings: list[str] = []
     label = row.data or "data desconhecida"
 
+    if row.ocr_warning:
+        warnings.append(f"{label}: {row.ocr_warning}")
+
     # Validate date format
     if row.data:
         parsed = _parse_date(row.data)

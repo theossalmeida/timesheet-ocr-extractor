@@ -65,8 +65,8 @@ def _build_headers(pair_count: int) -> tuple[list[str], list[int]]:
     for i in range(1, pair_count + 1):
         headers += [f"Entrada {i}", f"Saída {i}"]
         widths += [10, 10]
-    headers += ["Ocorrência", "Tipo"]
-    widths += [22, 20]
+    headers += ["Ocorrência", "Tipo", "Aviso OCR"]
+    widths += [22, 20, 42]
     return headers, widths
 
 
@@ -100,8 +100,8 @@ def build_guia_excel(rows: list[TimesheetRow]) -> bytes:
     ws = wb.active
     ws.title = "Registros"
 
-    guia_headers = ["Data", "Entrada 1", "Saída 1"]
-    guia_widths = [12, 10, 10]
+    guia_headers = ["Data", "Entrada 1", "Saída 1", "Aviso OCR"]
+    guia_widths = [12, 10, 10, 42]
 
     for col, (header, width) in enumerate(zip(guia_headers, guia_widths), start=1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -115,8 +115,8 @@ def build_guia_excel(rows: list[TimesheetRow]) -> bytes:
         excel_row = i + 1
         fill = _ALT_FILL if i % 2 == 0 else _WHITE_FILL
         marks = _padded_marcacoes(row, 1)
-        values = [row.data, marks[0], marks[1]]
-        alignments = [_LEFT, _CENTER, _CENTER]
+        values = [row.data, marks[0], marks[1], row.ocr_warning or ""]
+        alignments = [_LEFT, _CENTER, _CENTER, _LEFT]
         for col, (val, align) in enumerate(zip(values, alignments), start=1):
             cell = ws.cell(row=excel_row, column=col, value=val)
             cell.fill = fill
@@ -146,8 +146,9 @@ def build_excel(result: ExtractionResult) -> bytes:
             *_padded_marcacoes(row, pair_count),
             row.ocorrencia_raw,
             TIPO_LABELS.get(row.ocorrencia_tipo or "", "") if row.ocorrencia_tipo else "",
+            row.ocr_warning or "",
         ]
-        alignments = [_LEFT, *([_CENTER] * (pair_count * 2)), _LEFT, _LEFT]
+        alignments = [_LEFT, *([_CENTER] * (pair_count * 2)), _LEFT, _LEFT, _LEFT]
         for col, (val, align) in enumerate(zip(values, alignments), start=1):
             cell = ws1.cell(row=excel_row, column=col, value=val)
             cell.fill = fill
@@ -166,8 +167,8 @@ def build_excel(result: ExtractionResult) -> bytes:
 
     summary_data = [
         ("Total de registros", len(result.rows)),
-        ("Data inicial", min(dates) if dates else "—"),
-        ("Data final", max(dates) if dates else "—"),
+        ("Data inicial", min(dates) if dates else "-"),
+        ("Data final", max(dates) if dates else "-"),
         ("Dias trabalhados", trabalhados),
         ("Provider usado", result.provider),
         ("Tipo de PDF", result.pdf_type),

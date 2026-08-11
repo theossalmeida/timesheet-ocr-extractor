@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+from typing import Any
 
 import httpx
 import pypdf
@@ -15,28 +16,41 @@ from config import settings
 from models.timesheet import TimesheetRow
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia
 
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-3-flash-preview:generateContent"
-)
 GEMINI_PAGE_CHUNK_SIZE = 2
 GEMINI_TIMEOUT_SECONDS = 180.0
 GEMINI_RETRIES = 2
 
+
+def is_gemini_configured() -> bool:
+    return bool((settings.GEMINI_API_KEY or "").strip())
+
+
+def _gemini_url() -> str:
+    model = (settings.GEMINI_MODEL or "gemini-3.1-pro-preview").strip()
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
-Extract ALL timesheet rows from the provided document.
-Return a JSON array where each element has these fields (all optional, use null/empty if absent):
-- "data": date in DD/MM/YYYY format
-- "marcacoes": array of every clock-in/clock-out time for the day, in chronological order, HH:MM format — ONLY from columns explicitly labelled "Entrada"/"Saída" or equivalent. Include every pair found (there can be 1, 2, 3 or more) — never cap or drop any.
-- "ocorrencia_raw": occurrence/absence code exactly as written (e.g. "FERIAS", "FALTA", "DSR")
-IMPORTANT: columns labelled "Acréscimos", "Extras", "Adicional", "Intervalo", "QTDE"/total hours, or similar are NOT entrada/saída marks — ignore them entirely, do not include them in "marcacoes".
-Include rows with absences or occurrences even if no times are present.
-Return ONLY the JSON array, no explanation, no markdown."""
+Read only the supplied PDF pages/images and return strict JSON.
+
+Return this exact JSON object shape:
+{"rows":[{"data":"DD/MM/YYYY","marcacoes":["HH:MM","HH:MM"],"ocorrencia":null,"confidence":"high|medium|low"}]}
+
+Rules:
+- Extract only values visibly anchored to the work-time table or service form fields on the page.
+- For a normal cartao de ponto table, output one row per visible work date. Keep the punch times visible on that same row/date, in reading order.
+- For a single-service form such as PAPELETA DE SERVICOS, GUIA MINISTERIAL, ordem de servico, viagem/linha service sheet, or similar, output at most ONE row for the page. Use the visible DATA field as data and the visible INICIO/TRABALHO and TERMINO/TRABALHO fields as marcacoes.
+- Work-start labels may appear as INICIO/TRABALHO, INICIO, ENTRADA, HORA INICIO, PEGADA, or SAIDA GARAGEM.
+- Work-end labels may appear as TERMINO/TRABALHO, TERMINO, SAIDA, HORA TERMINO, LARGADA, or CHEGADA GARAGEM.
+- Ignore dates/times from signatures, electronic validation text, printed protocol text, QR codes, page numbers, addresses, phone numbers, totals, intervals, and footer/header metadata.
+- Do not infer sequential dates. Do not duplicate a single-service page into multiple days.
+- If the relevant date or work times are not readable, return {"rows":[]}.
+Return ONLY JSON, no markdown."""
 
 NORMALIZE_PROMPT = """You are a timesheet data parser. The following text is OCR output from a Brazilian labor timesheet document.
 Extract ALL timesheet rows and return a JSON array where each element has:
 - "data": date in DD/MM/YYYY format
-- "marcacoes": array of every clock-in/clock-out time for the day, in chronological order, HH:MM format (empty array if none). Include every pair found (there can be 1, 2, 3 or more) — never cap or drop any. Do not include totals/duration columns (e.g. "QTDE", "Adicional").
+- "marcacoes": array of every clock-in/clock-out time for the day, in chronological order, HH:MM format (empty array if none). Include every pair found (there can be 1, 2, 3 or more) - never cap or drop any. Do not include totals/duration columns (e.g. "QTDE", "Adicional").
 - "ocorrencia_raw": occurrence code as written (or null)
 Include rows with occurrences even without times.
 Return ONLY the JSON array.
@@ -50,50 +64,124 @@ class GeminiExtractionError(Exception):
 
 
 def _clean_json(text: str) -> str:
-    """Strip markdown code fences and fix common Gemini JSON issues."""
     text = text.strip()
-    # Remove ```json ... ``` or ``` ... ``` wrappers
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
 
-def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
+def _extract_response_text(response_json: dict) -> str:
     try:
-        text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-        text = _clean_json(text)
-        data = json.loads(text)
-    except (KeyError, IndexError) as e:
+        parts = response_json["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError) as e:
         raise GeminiExtractionError(f"Unexpected Gemini response structure: {e}") from e
+
+    text_parts = [part.get("text", "") for part in parts if isinstance(part, dict)]
+    text = "".join(text_parts).strip()
+    if not text:
+        raise GeminiExtractionError("Gemini returned an empty response")
+    return text
+
+
+def _loads_gemini_json(text: str) -> Any:
+    text = _clean_json(text)
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as e:
-        logger.warning("Gemini JSON parse failed — attempting truncation recovery: %s", e)
-        # Try truncating to last valid complete object
-        last_bracket = text.rfind("},")
-        if last_bracket > 0:
+        match = re.search(r"\{.*\}|\[.*\]", text, re.DOTALL)
+        if match:
             try:
-                data = json.loads(text[: last_bracket + 1] + "]")
+                return json.loads(match.group(0))
             except json.JSONDecodeError:
-                raise GeminiExtractionError(f"Failed to parse Gemini response: {e}") from e
-        else:
-            raise GeminiExtractionError(f"Failed to parse Gemini response: {e}") from e
+                pass
+        raise GeminiExtractionError(f"Failed to parse Gemini response: {e}") from e
+
+
+def _confidence_label(raw: dict[str, Any]) -> str | None:
+    value = str(raw.get("confidence") or raw.get("confianca") or "").strip().lower()
+    if value in {"high", "alta"}:
+        return "high"
+    if value in {"medium", "media", "mediana"}:
+        return "medium"
+    if value in {"low", "baixa"}:
+        return "low"
+    return None
+
+
+def _ocr_warning_for_confidence(confidence: str | None) -> str | None:
+    if confidence == "low":
+        return "Baixa confianca OCR: conferir esta linha no PDF original."
+    return None
+
+
+def _rows_from_payload(payload: Any) -> list[TimesheetRow]:
+    if isinstance(payload, list):
+        raw_rows = payload
+    elif isinstance(payload, dict):
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list) or not raw_rows:
+            raw_rows = payload.get("records")
+    else:
+        raw_rows = None
+
+    if not isinstance(raw_rows, list):
+        return []
 
     rows: list[TimesheetRow] = []
-    for item in data:
-        occ_raw, occ_tipo = normalize_ocorrencia(item.get("ocorrencia_raw") or "")
-        marcacoes = [
-            nt for t in (item.get("marcacoes") or []) if (nt := normalize_time(t or ""))
-        ]
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+
+        date_str = normalize_date(str(raw.get("data") or raw.get("date") or ""))
+        if not date_str:
+            continue
+
+        raw_times = raw.get("marcacoes") or raw.get("times") or []
+        if not isinstance(raw_times, list):
+            raw_times = []
+
+        marcacoes: list[str] = []
+        for value in raw_times:
+            normalized = normalize_time(str(value or ""))
+            if normalized:
+                marcacoes.append(normalized)
+
+        for key in ("entrada", "entry", "inicio", "start", "saida", "exit", "termino", "end"):
+            normalized = normalize_time(str(raw.get(key) or ""))
+            if normalized and normalized not in marcacoes:
+                marcacoes.append(normalized)
+
+        occ_value = str(raw.get("ocorrencia_raw") or raw.get("ocorrencia") or raw.get("occurrence") or "").strip()
+        occ_raw, occ_tipo = normalize_ocorrencia(occ_value) if occ_value else (None, None)
+        if occ_tipo == "trabalho_normal":
+            occ_raw, occ_tipo = None, None
+
+        confidence = _confidence_label(raw)
         rows.append(TimesheetRow(
-            data=normalize_date(item.get("data") or ""),
+            data=date_str,
             marcacoes=marcacoes,
             ocorrencia_raw=occ_raw,
             ocorrencia_tipo=occ_tipo,
+            ocr_confidence=confidence,
+            ocr_warning=_ocr_warning_for_confidence(confidence),
         ))
     return rows
 
 
+def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
+    payload = _loads_gemini_json(_extract_response_text(response_json))
+    return _rows_from_payload(payload)
+
+
 async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
-    logger.info("Calling Gemini extract API — pdf_size=%d bytes", len(pdf_bytes))
+    if not is_gemini_configured():
+        return []
+
+    logger.info(
+        "Calling Gemini extract API - model=%s pdf_size=%d bytes",
+        settings.GEMINI_MODEL,
+        len(pdf_bytes),
+    )
     encoded = base64.b64encode(pdf_bytes).decode("utf-8")
     body = {
         "contents": [{
@@ -104,8 +192,8 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0.1,
-            "maxOutputTokens": 65536,
+            "temperature": 0,
+            "maxOutputTokens": 8192,
         },
     }
     response = None
@@ -113,7 +201,7 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS)) as client:
                 response = await client.post(
-                    GEMINI_URL,
+                    _gemini_url(),
                     params={"key": settings.GEMINI_API_KEY},
                     json=body,
                 )
@@ -135,7 +223,7 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
         raise GeminiExtractionError("Gemini request did not return a response")
     if response.status_code != 200:
         logger.error(
-            "Gemini API error — status=%d body=%s",
+            "Gemini API error - status=%d body=%s",
             response.status_code,
             response.text[:300],
         )
@@ -198,26 +286,29 @@ async def extract_with_gemini_adaptive(
 
 
 async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
-    logger.info("Calling Gemini normalize API — text_len=%d chars", len(ocr_text))
+    if not is_gemini_configured():
+        return []
+
+    logger.info("Calling Gemini normalize API - text_len=%d chars", len(ocr_text))
     body = {
         "contents": [{
             "parts": [{"text": NORMALIZE_PROMPT + ocr_text}]
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0.1,
-            "maxOutputTokens": 65536,
+            "temperature": 0,
+            "maxOutputTokens": 8192,
         },
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
         response = await client.post(
-            GEMINI_URL,
+            _gemini_url(),
             params={"key": settings.GEMINI_API_KEY},
             json=body,
         )
     if response.status_code != 200:
         logger.error(
-            "Gemini normalization error — status=%d body=%s",
+            "Gemini normalization error - status=%d body=%s",
             response.status_code,
             response.text[:300],
         )

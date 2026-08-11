@@ -78,3 +78,20 @@ def test_data_row_count():
     ws = wb["Registros de Ponto"]
     # Row 1 is header, rows 2-6 are data
     assert ws.max_row == 6
+
+def test_excel_includes_ocr_warning_column():
+    rows = [
+        TimesheetRow(
+            data="01/03/2024",
+            marcacoes=["08:00", "17:00"],
+            ocr_confidence="low",
+            ocr_warning="Baixa confianca OCR: conferir esta linha no PDF original.",
+        )
+    ]
+    result = ExtractionResult(rows=rows, provider="local-vision", pdf_type="scanned")
+
+    wb = openpyxl.load_workbook(io.BytesIO(build_excel(result)))
+    ws = wb["Registros de Ponto"]
+
+    assert ws.cell(row=1, column=8).value == "Aviso OCR"
+    assert "Baixa confianca" in ws.cell(row=2, column=8).value

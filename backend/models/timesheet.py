@@ -23,6 +23,8 @@ class TimesheetRow(BaseModel):
     ocorrencia_raw: str | None = None
     ocorrencia_tipo: OcorrenciaTipo | None = None
     worker_name: str | None = None
+    ocr_confidence: Literal["high", "medium", "low"] | None = None
+    ocr_warning: str | None = None
 
 
 class ExtractionResult(BaseModel):
@@ -30,9 +32,12 @@ class ExtractionResult(BaseModel):
     provider: Literal[
         "pdfplumber",
         "tesseract",
+        "gemini",
         "local-vision",
         "pdfplumber+tesseract",
+        "pdfplumber+gemini",
         "pdfplumber+local-vision",
+        "pdfplumber+tesseract+gemini",
         "pdfplumber+tesseract+local-vision",
         "tesseract-guia",
         "local-vision-guia",
@@ -50,7 +55,7 @@ class ExtractionResult(BaseModel):
 class ExtractResponse(BaseModel):
     filename: str
     rows_extracted: int
-    provider: Literal["pdfplumber", "tesseract", "pdfplumber+tesseract"]
+    provider: Literal["pdfplumber", "tesseract", "gemini", "local-vision", "pdfplumber+tesseract", "pdfplumber+gemini", "pdfplumber+local-vision"]
     pdf_type: Literal["native", "scanned", "mixed"]
     warnings: list[str] = []
     download_url: str | None = None
