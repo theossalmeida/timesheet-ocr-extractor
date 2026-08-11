@@ -53,6 +53,7 @@ export function useExtraction(): ExtractionHook {
       let interval: ReturnType<typeof setInterval> | undefined;
 
       if (
+        mode !== "cartao" &&
         mode !== "guia" &&
         mode !== "contracheque" &&
         mode !== "horas_extras" &&
@@ -143,7 +144,7 @@ export function useExtraction(): ExtractionHook {
           const result = await (
             mode === "guia"
               ? extractGuia(file, handleChunkProgress)
-              : extractTimesheet(file)
+              : extractTimesheet(file, handleChunkProgress)
           );
           clearInterval(interval);
 

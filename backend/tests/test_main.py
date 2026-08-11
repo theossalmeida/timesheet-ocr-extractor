@@ -2,6 +2,7 @@ import io
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from main import app
@@ -72,6 +73,34 @@ def test_extract_success_returns_bundle():
     assert r.headers["x-provider-used"] == "pdfplumber"
     assert r.headers["x-rows-extracted"] == "2"
     assert r.headers["x-pdf-type"] == "native"
+
+
+def test_extract_stream_success_returns_sse_bundle():
+    with patch("main._run_pipeline", new=AsyncMock(return_value=(SAMPLE_RESULT, "pdfplumber"))), \
+         patch("main.build_excel", return_value=b"PKfake_excel_bytes"):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post("/extract/stream", files={"file": ("test.pdf", data, "application/pdf")})
+
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    assert '"type": "progress"' in r.text
+    assert '"type": "done"' in r.text
+    assert '"rows_extracted": 2' in r.text
+    assert '"provider": "pdfplumber"' in r.text
+    assert '"excel_filename": "timesheet_test.xlsx"' in r.text
+
+
+def test_extract_stream_pipeline_error_returns_sse_error():
+    error = HTTPException(status_code=422, detail="Nenhum registro de ponto encontrado no PDF.")
+    with patch("main._run_pipeline", new=AsyncMock(side_effect=error)):
+        data = io.BytesIO(MINIMAL_PDF)
+        r = client.post("/extract/stream", files={"file": ("test.pdf", data, "application/pdf")})
+
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    assert '"type": "error"' in r.text
+    assert '"status": 422' in r.text
+    assert "Nenhum registro de ponto" in r.text
 
 
 def test_extract_uses_pdfplumber_even_when_type_not_native():

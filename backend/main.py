@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import logging
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -110,7 +111,7 @@ def _sort_key(date_str: str | None) -> tuple[int, int, int]:
 
 def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
     """Run local Tesseract OCR extraction for the generic timesheet format,
-    never raising â€” an empty list means "could not be read locally"
+    never raising - an empty list means "could not be read locally"
     (Tesseract not installed, unrenderable bytes, or no rows matched).
     """
     if not is_tesseract_available():
@@ -190,7 +191,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
 
     provider = "pdfplumber"
 
-    # Always attempt local extraction first â€” detect_pdf_type is only a hint and
+    # Always attempt local extraction first - detect_pdf_type is only a hint and
     # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
     # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
     # OCR is the fallback, only reached when pdfplumber yields nothing for a page.
@@ -202,12 +203,12 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
         scanned_bytes = get_scanned_page_bytes(pdf_bytes)
         if scanned_bytes:
             pdf_type = "mixed"
-            logger.info("Hybrid PDF: found scanned pages â€” running local Tesseract OCR")
+            logger.info("Hybrid PDF: found scanned pages - running local Tesseract OCR")
             extra_rows = await asyncio.to_thread(_run_tesseract_timesheet, scanned_bytes)
             if extra_rows:
                 provider = "pdfplumber+tesseract"
                 rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                logger.info("Hybrid merge â€” total rows=%d", len(rows))
+                logger.info("Hybrid merge - total rows=%d", len(rows))
             else:
                 extra_rows = await _run_gemini_timesheet(scanned_bytes)
                 if extra_rows:
@@ -248,7 +249,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     result_warnings = validate_result(rows)
 
     logger.info(
-        "Extraction complete â€” provider=%s rows=%d pdf_type=%s warnings=%d",
+        "Extraction complete - provider=%s rows=%d pdf_type=%s warnings=%d",
         provider,
         len(rows),
         pdf_type,
@@ -265,6 +266,78 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     return result, provider
 
 
+
+def _timesheet_bundle_content(result: ExtractionResult, provider: str, original_stem: str) -> dict:
+    excel_bytes = build_excel(result)
+    csv_content = build_csv(result)
+    return {
+        "excel_b64": base64.b64encode(excel_bytes).decode(),
+        "excel_filename": f"timesheet_{original_stem}.xlsx",
+        "csv_b64": base64.b64encode(csv_content.encode("utf-8-sig")).decode(),
+        "csv_filename": f"pjecalc_{original_stem}.csv",
+        "csv_mime": "text/csv",
+        "rows_extracted": result.total_rows,
+        "provider": provider,
+        "pdf_type": result.pdf_type,
+    }
+
+
+async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
+    yield "data: " + json.dumps({
+        "type": "progress",
+        "chunk": 1,
+        "total": 5,
+        "step": "received",
+        "message": "Arquivo recebido. Analisando PDF...",
+    }, ensure_ascii=False) + "\n\n"
+
+    task = asyncio.create_task(_run_pipeline(pdf_bytes))
+    yielded_extracting = False
+    while not task.done():
+        if not yielded_extracting:
+            yielded_extracting = True
+            yield "data: " + json.dumps({
+                "type": "progress",
+                "chunk": 2,
+                "total": 5,
+                "step": "extracting",
+                "message": "Extraindo registros...",
+            }, ensure_ascii=False) + "\n\n"
+
+        await asyncio.wait({task}, timeout=10)
+        if not task.done():
+            yield ": keep-alive\n\n"
+
+    try:
+        result, provider = task.result()
+    except HTTPException as e:
+        yield "data: " + json.dumps({
+            "type": "error",
+            "message": str(e.detail),
+            "status": e.status_code,
+        }, ensure_ascii=False) + "\n\n"
+        return
+    except Exception as e:
+        logger.exception("timesheet stream: unexpected error - %s", e)
+        yield "data: " + json.dumps({
+            "type": "error",
+            "message": "Erro interno ao processar o PDF.",
+            "status": 500,
+        }, ensure_ascii=False) + "\n\n"
+        return
+
+    yield "data: " + json.dumps({
+        "type": "progress",
+        "chunk": 4,
+        "total": 5,
+        "step": "building",
+        "message": "Gerando arquivos...",
+    }, ensure_ascii=False) + "\n\n"
+
+    content = _timesheet_bundle_content(result, provider, original_stem)
+    content["type"] = "done"
+    yield "data: " + json.dumps(content, ensure_ascii=False) + "\n\n"
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "1.0.0"}
@@ -275,33 +348,45 @@ async def health():
 async def extract(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /extract â€” filename=%s size=%d bytes",
+        "POST /extract - filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
     _validate_pdf(pdf_bytes, len(pdf_bytes))
 
     result, provider = await _run_pipeline(pdf_bytes)
-    excel_bytes = build_excel(result)
-    csv_content = build_csv(result)
-
     original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
+    content = _timesheet_bundle_content(result, provider, original_stem)
 
     return JSONResponse(
-        content={
-            "excel_b64": base64.b64encode(excel_bytes).decode(),
-            "excel_filename": f"timesheet_{original_stem}.xlsx",
-            "csv_b64": base64.b64encode(csv_content.encode("utf-8-sig")).decode(),
-            "csv_filename": f"pjecalc_{original_stem}.csv",
-            "csv_mime": "text/csv",
-            "rows_extracted": result.total_rows,
-            "provider": provider,
-            "pdf_type": result.pdf_type,
-        },
+        content=content,
         headers={
             "X-Provider-Used": provider,
             "X-Rows-Extracted": str(result.total_rows),
             "X-PDF-Type": result.pdf_type,
+        },
+    )
+
+
+@app.post("/extract/stream")
+@limiter.limit("10/minute")
+async def extract_stream(request: Request, file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    logger.info(
+        "POST /extract/stream - filename=%s size=%d bytes",
+        file.filename or "unknown",
+        len(pdf_bytes),
+    )
+    _validate_pdf(pdf_bytes, len(pdf_bytes))
+
+    original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
+    return StreamingResponse(
+        stream_timesheet_extraction(pdf_bytes, original_stem),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 
@@ -311,7 +396,7 @@ async def extract(request: Request, file: UploadFile = File(...)):
 async def extract_guia(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /extract/guia â€” filename=%s size=%d bytes",
+        "POST /extract/guia - filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
@@ -359,7 +444,7 @@ async def extract_frequencia(request: Request, file: UploadFile = File(...)):
 async def extract_contracheque(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /contracheque â€” filename=%s size=%d bytes",
+        "POST /contracheque - filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
@@ -407,7 +492,7 @@ async def extract_contracheque_horas_extras(request: Request, file: UploadFile =
 async def preview(request: Request, file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     logger.info(
-        "POST /preview â€” filename=%s size=%d bytes",
+        "POST /preview - filename=%s size=%d bytes",
         file.filename or "unknown",
         len(pdf_bytes),
     )
