@@ -80,6 +80,44 @@ def test_extracts_rows_when_horas_is_split_by_pdf_text():
     assert result[0].details == "00:20 2021 +1,50 +23,30"
 
 
+def test_extracts_rows_when_horas_wraps_to_a_separate_line():
+    pdf = _mock_pdf_with_text(
+        """
+        Periodo 01/08/2021 a 31/08/2021
+        31/08 ter FOLG 08:01 09:06 -1,00 +0,80 Turno de 12
+        Horas
+        """
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    assert len(result) == 1
+    assert result[0].date == date(2021, 8, 31)
+    assert result[0].scale == "FOLG"
+    assert result[0].details == "08:01 09:06 -1,00 +0,80"
+
+
+def test_extracts_vacation_row_when_horas_wraps_to_a_separate_line():
+    pdf = _mock_pdf_with_text(
+        """
+        Periodo 01/11/2021 a 30/11/2021
+        18/11 qui 12:00 1019 -6,20 Turno de 12
+        Horas
+        """
+    )
+
+    with patch("pdfplumber.open", return_value=pdf):
+        result = extract_frequency_days_pdfplumber(b"fake")
+
+    assert len(result) == 1
+    assert result[0].date == date(2021, 11, 18)
+    assert result[0].details.startswith("12:00 1019")
+
+    classified = classify_frequency_days(result)
+    assert classified[0].situation == "FERIAS"
+
+
 def test_extracts_day_only_frequency_rows_from_new_petrobras_format():
     pdf = _mock_pdf_with_text(
         """
