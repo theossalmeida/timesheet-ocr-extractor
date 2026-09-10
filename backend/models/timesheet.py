@@ -40,7 +40,12 @@ class ExtractionResult(BaseModel):
         "pdfplumber+tesseract+gemini",
         "pdfplumber+tesseract+local-vision",
         "tesseract-guia",
+        "gemini-guia",
         "local-vision-guia",
+        "tesseract-guia+gemini-guia",
+        "tesseract-guia+local-vision-guia",
+        "gemini-guia+local-vision-guia",
+        "tesseract-guia+gemini-guia+local-vision-guia",
         "tesseract-guia+local-vision",
     ]
     pdf_type: Literal["native", "scanned", "mixed"]

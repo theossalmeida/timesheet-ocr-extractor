@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+import storage
 from database import pool
 from main import app
 
@@ -42,7 +43,7 @@ def test_persist_and_isolate_all_modes(owner, route, factory, mode):
     assert owner.headers['x-team-id'] == original_team
 
 
-def test_failed_generation_retains_original(owner):
+def test_failed_generation_discards_the_run(owner):
     app.state.limiter._limiter.storage.reset()
 
     async def broken(*args):
@@ -51,9 +52,10 @@ def test_failed_generation_retains_original(owner):
     with patch('main.stream_timesheet_extraction',broken):
         response = owner.post('/extract/stream',files={'file':('broken.pdf',b'%PDF broken','application/pdf')})
     assert '"type": "error"' in response.text
-    row = owner.get('/documents',params={'q':'broken.pdf'}).json()['documents'][0]
-    assert row['status'] == 'interrupted'
-    assert [a['kind'] for a in row['artifacts']] == ['original']
+    # A run that produced nothing keeps nothing: no history row, no stored bytes.
+    assert owner.get('/documents',params={'q':'broken.pdf'}).json()['documents'] == []
+    with pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM extractions WHERE filename='broken.pdf'").fetchone()['n'] == 0
 
 
 def _done_event(ai_usage):
@@ -108,3 +110,37 @@ def test_unpriceable_call_leaves_the_cost_unknown(owner, monkeypatch):
 
     document = owner.get('/documents',params={'q':'unmetered.pdf'}).json()['documents'][0]
     assert document['cost_brl'] is None
+
+
+def test_failed_run_leaves_nothing_behind(owner, monkeypatch):
+    app.state.limiter._limiter.storage.reset()
+    removed = []
+    original = storage.delete
+    monkeypatch.setattr(storage,'delete',lambda key: removed.append(key) or original(key))
+
+    async def broken(*args):
+        yield 'data: '+json.dumps({'type':'error','message':'falhou'})+'\n\n'
+
+    with patch('main.stream_timesheet_extraction',broken):
+        owner.post('/extract/stream',files={'file':('apagado.pdf',b'%PDF apagado','application/pdf')})
+
+    assert any('raw_files' in key for key in removed)
+    with pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM extractions WHERE filename='apagado.pdf'").fetchone()['n'] == 0
+        assert conn.execute("SELECT count(*) AS n FROM artifacts WHERE filename='apagado.pdf'").fetchone()['n'] == 0
+
+
+def test_failed_runs_are_excluded_from_history_and_the_monthly_summary(owner):
+    app.state.limiter._limiter.storage.reset()
+    before = owner.get('/documents').json()['summary']
+
+    async def broken(*args):
+        yield 'data: '+json.dumps({'type':'error','message':'falhou'})+'\n\n'
+
+    with patch('main.stream_timesheet_extraction',broken):
+        owner.post('/extract/stream',files={'file':('descartado.pdf',b'%PDF descartado','application/pdf')})
+
+    history = owner.get('/documents',params={'q':'descartado.pdf'}).json()
+    assert history['documents'] == []
+    assert owner.get('/documents').json()['summary']['documents'] == before['documents']
+    assert owner.get('/documents').json()['summary']['unknown_costs'] == before['unknown_costs']

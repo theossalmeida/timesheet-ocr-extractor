@@ -63,3 +63,31 @@ def test_upload_bounds(owner):
     assert owner.put(f'/uploads/{upload}/0',content=b'nope').status_code == 400
     assert owner.put(f'/uploads/{upload}/25',content=b'nope').status_code == 400
     assert owner.delete('/uploads/'+upload).status_code == 200
+
+
+def test_failed_job_is_discarded_and_still_reported_to_the_poller(owner):
+    pdf = b'%PDF test discarded job'
+    app.state.limiter._limiter.storage.reset()
+    client = TestClient(app,headers=dict(owner.headers),cookies=owner.cookies)
+    with patch("main.initialize"), patch("main.pool.close"), client:
+        upload = client.post('/uploads',json={'filename':'descartado.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']
+        assert client.put(f'/uploads/{upload}/0',content=pdf).status_code == 200
+
+        async def stream(*args):
+            yield 'data: '+json.dumps({'type':'error','message':'Nenhum registro encontrado nas guias ministeriais.'})+'\n\n'
+
+        with patch('main.stream_guia_extraction',stream):
+            job_id = client.post(f'/uploads/{upload}/process').json()['id']
+            for _ in range(40):
+                status = client.get('/documents/'+job_id).json()
+                if status['status'] != 'processing':
+                    break
+                time.sleep(.1)
+
+    # The poller still learns it failed, even though nothing was kept.
+    assert status['status'] == 'failed'
+    assert status['artifacts'] == []
+    with pool.connection() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM extractions WHERE id=%s',(job_id,)).fetchone()['n'] == 0
+        assert conn.execute('SELECT count(*) AS n FROM uploads WHERE id=%s',(upload,)).fetchone()['n'] == 0
+    assert owner.get('/documents',params={'q':'descartado.pdf'}).json()['documents'] == []

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from access import AccessMiddleware
 from accounts import router as accounts_router
 from database import initialize, pool
-from documents import router as documents_router, stored_stream, safe_filename, create_extraction, finish_extraction, fail_extraction, processing_lock
+from documents import router as documents_router, stored_stream, safe_filename, create_extraction, finish_extraction, fail_extraction, processing_lock, purge_incomplete
 from security import team
 from jobs import router as jobs_router, drain_jobs
 
@@ -61,6 +61,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 @asynccontextmanager
 async def lifespan(app):
     await asyncio.to_thread(initialize)
+    await asyncio.to_thread(purge_incomplete)
     yield
     await drain_jobs()
     await asyncio.to_thread(pool.close)

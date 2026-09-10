@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from database import pool
 import storage
-from documents import fail_extraction, finish_extraction, processing_lock, safe_filename
+from documents import discarded, fail_extraction, finish_extraction, processing_lock, safe_filename
 from security import team, throttle, user
 
 router = APIRouter()
@@ -161,7 +161,10 @@ def job_status(extraction_id: UUID, request: Request):
     with pool.connection() as conn:
         row = conn.execute("SELECT id,status,error FROM extractions WHERE id=%s AND team_id=%s", (extraction_id,selected['team_id'])).fetchone()
         if not row:
-            raise HTTPException(404,'Documento não encontrado.')
+            outcome = discarded.get(str(extraction_id))
+            if not outcome:
+                raise HTTPException(404,'Documento não encontrado.')
+            return {'id':extraction_id,'status':outcome['status'],'error':outcome['error'],'artifacts':[],'progress':{'message':outcome['error'],'chunk':0,'total':1}}
         row['artifacts'] = conn.execute("SELECT id,kind,filename FROM artifacts WHERE extraction_id=%s AND kind!='original'", (extraction_id,)).fetchall()
     row['progress'] = progress.get(str(extraction_id),{'message':'Aguardando processamento…','chunk':0,'total':1})
     return row

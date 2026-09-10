@@ -10,6 +10,7 @@ import pypdf
 logger = logging.getLogger(__name__)
 
 from models.timesheet import TimesheetRow
+from services import ai_usage
 from utils.normalizers import normalize_date, normalize_time
 
 CHUNK_SIZE = 20  # pages per local-OCR request (keeps progress updates granular)
@@ -143,6 +144,50 @@ async def _process_chunk_local_vision(chunk_bytes: bytes) -> list[dict]:
         logger.warning("guia: local vision OCR raised unexpected error: %s", e)
         return []
 
+
+def _record_from_row(row: TimesheetRow) -> dict:
+    """A guia page is one service form: earliest punch in, latest punch out."""
+    return {
+        "data": row.data,
+        "entrada": row.marcacoes[0] if row.marcacoes else None,
+        "saida": row.marcacoes[-1] if len(row.marcacoes) > 1 else None,
+        "_confidence": row.ocr_confidence,
+        "_ocr_warning": row.ocr_warning,
+    }
+
+
+async def _process_chunk_gemini(chunk_bytes: bytes) -> list[dict]:
+    """Paid vision fallback for pages Tesseract cannot read.
+
+    Many guias are filled out by hand and Tesseract is a printed-text engine,
+    so this is usually the only stage that can read them at all. Its extraction
+    prompt already covers single-service forms (GUIA MINISTERIAL, PAPELETA DE
+    SERVICOS), and every call it makes is metered by services/ai_usage.py.
+    """
+    from services.gemini_service import (
+        GeminiExtractionError,
+        extract_with_gemini_adaptive,
+        is_gemini_configured,
+    )
+
+    if not is_gemini_configured():
+        logger.debug("guia: Gemini is not configured, skipping")
+        return []
+
+    try:
+        rows = await extract_with_gemini_adaptive(chunk_bytes)
+    except GeminiExtractionError as e:
+        logger.warning("guia: Gemini OCR failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("guia: Gemini OCR raised unexpected error: %s", e)
+        return []
+
+    if rows:
+        logger.info("guia: Gemini OCR read %d record(s)", len(rows))
+    return [_record_from_row(row) for row in rows]
+
+
 def _date_sort_key(date_str: str) -> tuple[int, int, int]:
     try:
         d, m, y = date_str.split("/")
@@ -196,58 +241,65 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
     from services.csv_builder import build_guia_csv
 
     try:
-        chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
-        total = len(chunks)
-        all_records: list[dict] = []
-        used_tesseract = False
-        used_local_vision = False
+        with ai_usage.recording() as ai_calls:
+            chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
+            total = len(chunks)
+            all_records: list[dict] = []
+            used: list[str] = []
 
-        for i, chunk in enumerate(chunks):
-            yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total}...'})}\n\n"
+            for i, chunk in enumerate(chunks):
+                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total}...'})}\n\n"
 
-            task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
-            while not task.done():
-                yield ": keep-alive\n\n"
-                await asyncio.sleep(15)
-
-            records = task.result()
-            if records:
-                used_tesseract = True
-            else:
-                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'local-vision', 'message': f'OCR com IA local: processando parte {i + 1} de {total}...'})}\n\n"
-                vision_task = asyncio.create_task(_process_chunk_local_vision(chunk))
-                while not vision_task.done():
+                task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
+                while not task.done():
                     yield ": keep-alive\n\n"
                     await asyncio.sleep(15)
-                records = vision_task.result()
-                if records:
-                    used_local_vision = True
 
-            all_records.extend(records)
+                records = task.result()
+                engine = "tesseract-guia" if records else ""
 
-        rows = _aggregate(all_records)
+                # Handwritten guias defeat Tesseract, so fall back the same way
+                # the cartao pipeline does: Gemini first, local vision last.
+                for step, label, factory in (
+                    ("gemini", "IA (Gemini)", _process_chunk_gemini),
+                    ("local-vision", "IA local", _process_chunk_local_vision),
+                ):
+                    if records:
+                        break
+                    yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': step, 'message': f'OCR com {label}: processando parte {i + 1} de {total}...'})}\n\n"
+                    fallback = asyncio.create_task(factory(chunk))
+                    while not fallback.done():
+                        yield ": keep-alive\n\n"
+                        await asyncio.sleep(15)
+                    records = fallback.result()
+                    if records:
+                        engine = step + "-guia"
 
-        if not rows:
-            yield f"data: {_json.dumps({'type': 'error', 'message': 'Nenhum registro encontrado nas guias ministeriais.'})}\n\n"
-            return
+                if engine and engine not in used:
+                    used.append(engine)
+                all_records.extend(records)
 
-        excel_bytes = build_guia_excel(rows)
-        csv_bytes, csv_mime = build_guia_csv(rows)
-        csv_ext = "zip" if csv_mime == "application/zip" else "csv"
-        provider = "local-vision-guia" if used_local_vision else "tesseract-guia"
-        if used_tesseract and used_local_vision:
-            provider = "tesseract-guia+local-vision"
+            rows = _aggregate(all_records)
 
-        yield "data: " + _json.dumps({
-            "type": "done",
-            "excel_b64": _b64.b64encode(excel_bytes).decode(),
-            "excel_filename": f"guia_{original_stem}.xlsx",
-            "csv_b64": _b64.b64encode(csv_bytes).decode(),
-            "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
-            "csv_mime": csv_mime,
-            "rows_extracted": len(rows),
-            "provider": provider,
-        }, ensure_ascii=False) + "\n\n"
+            if not rows:
+                yield f"data: {_json.dumps({'type': 'error', 'message': 'Nenhum registro encontrado nas guias ministeriais.'})}\n\n"
+                return
+
+            excel_bytes = build_guia_excel(rows)
+            csv_bytes, csv_mime = build_guia_csv(rows)
+            csv_ext = "zip" if csv_mime == "application/zip" else "csv"
+
+            yield "data: " + _json.dumps({
+                "type": "done",
+                "excel_b64": _b64.b64encode(excel_bytes).decode(),
+                "excel_filename": f"guia_{original_stem}.xlsx",
+                "csv_b64": _b64.b64encode(csv_bytes).decode(),
+                "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
+                "csv_mime": csv_mime,
+                "rows_extracted": len(rows),
+                "provider": "+".join(used) or "tesseract-guia",
+                "ai_usage": list(ai_calls),
+            }, ensure_ascii=False) + "\n\n"
 
     except Exception as e:
         logger.exception("guia stream: unexpected error - %s", e)
@@ -266,7 +318,10 @@ async def extract_with_guia_ministerial(
         logger.info("guia: processing chunk %d/%d - %d bytes", i + 1, len(chunks), len(chunk))
         records = await asyncio.to_thread(_process_chunk_tesseract, chunk)
         if not records:
-            logger.info("guia: chunk %d had no Tesseract records; trying local vision OCR", i + 1)
+            logger.info("guia: chunk %d had no Tesseract records; trying Gemini", i + 1)
+            records = await _process_chunk_gemini(chunk)
+        if not records:
+            logger.info("guia: chunk %d still empty; trying local vision OCR", i + 1)
             records = await _process_chunk_local_vision(chunk)
         logger.info("guia: chunk %d -> %d records", i + 1, len(records))
         all_records.extend(records)

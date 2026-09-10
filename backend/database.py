@@ -26,6 +26,5 @@ def initialize():
     pool.open()
     migrate()
     with pool.connection() as conn:
-        conn.execute("UPDATE extractions SET status='interrupted', error='Processamento interrompido pelo reinício do servidor.', completed_at=now() WHERE status='processing'")
         conn.execute("DELETE FROM sessions WHERE expires_at < now()")
         conn.execute("DELETE FROM auth_attempts WHERE window_start < now() - interval '1 day'")

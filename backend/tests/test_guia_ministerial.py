@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 import io
+import json
 import pypdf
 import pytest
 
@@ -7,8 +8,10 @@ from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
     _extract_records_from_text,
+    _record_from_row,
     _split_pdf_chunks,
     extract_with_guia_ministerial,
+    stream_guia_extraction,
 )
 from models.timesheet import TimesheetRow
 
@@ -220,3 +223,63 @@ async def test_extract_falls_back_to_local_vision_when_tesseract_empty():
     assert len(rows) == 1
     assert rows[0].data == "01/03/2024"
     assert rows[0].marcacoes == ["08:00", "17:00"]
+
+
+@pytest.mark.anyio
+async def test_extract_prefers_gemini_over_local_vision_when_tesseract_is_empty():
+    pdf = _make_minimal_pdf(1)
+    records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+
+    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=records)) as gemini_mock, \
+         patch("services.guia_ministerial_service._process_chunk_local_vision",
+               new=AsyncMock(return_value=[])) as vision_mock:
+        rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
+
+    gemini_mock.assert_awaited_once()
+    vision_mock.assert_not_awaited()
+    assert len(rows) == 1
+    assert rows[0].marcacoes == ["08:00", "17:00"]
+
+
+def test_record_from_row_maps_a_single_service_form():
+    row = TimesheetRow(data="01/03/2024", marcacoes=["07:30", "12:00", "19:45"], ocr_confidence="low",
+                       ocr_warning="Baixa confianca OCR: conferir esta linha no PDF original.")
+
+    record = _record_from_row(row)
+
+    assert record["data"] == "01/03/2024"
+    assert record["entrada"] == "07:30"
+    assert record["saida"] == "19:45"
+    assert record["_confidence"] == "low"
+
+
+def test_record_from_row_without_a_second_punch():
+    assert _record_from_row(TimesheetRow(data="01/03/2024", marcacoes=["07:30"]))["saida"] is None
+
+
+@pytest.mark.anyio
+async def test_stream_meters_gemini_and_reports_it_as_the_provider():
+    from services import ai_usage
+
+    async def fake_gemini(chunk_bytes):
+        ai_usage.record("gemini", "gemini-3.1-pro-preview", "extract",
+                        {"prompt_tokens": 1000, "cached_tokens": 0, "output_tokens": 500,
+                         "thought_tokens": 0, "total_tokens": 1500})
+        return [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+
+    events = []
+    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
+         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+        async for chunk in stream_guia_extraction(_make_minimal_pdf(1), "504"):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["provider"] == "gemini-guia"
+    assert done["rows_extracted"] == 1
+    # The cost of the call travels with the result so it can be billed.
+    assert [call["prompt_tokens"] for call in done["ai_usage"]] == [1000]

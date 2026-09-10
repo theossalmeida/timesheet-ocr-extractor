@@ -30,10 +30,11 @@ class Settings(BaseSettings):
     # machines. Leave empty to rely on PATH resolution (the default in Docker/
     # Fly.io, where apt-get installs it onto PATH already).
     TESSERACT_CMD: str = ""
-    # Optional local vision-model fallback for scanned/handwritten pages that
-    # Tesseract cannot read. Expected to be LM Studio/OpenAI-compatible or
-    # Ollama. Example LM Studio on a Tailscale Mac:
-    # http://100.79.108.26:1234
+    # Optional free fallback for scanned/handwritten pages, tried after Gemini.
+    # Expected to be LM Studio/OpenAI-compatible or Ollama. It runs on the same
+    # Windows host as the services, so this is normally http://127.0.0.1:1234 -
+    # note the model server must run as a service too, or it disappears when
+    # the interactive session logs out and this fallback silently goes away.
     LOCAL_VISION_OCR_BASE_URL: str = ""
     LOCAL_VISION_OCR_MODEL: str = "PaddleOCR-VL-1.6-8bit"
     LOCAL_VISION_OCR_PROVIDER: str = "auto"
