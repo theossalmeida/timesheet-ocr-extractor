@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Price with the map bundled in the pinned litellm release: deterministic, and
 # no network call while litellm is imported. Set LITELLM_LOCAL_MODEL_COST_MAP
 # to "false" in the environment to let litellm refresh prices from its repo.
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "False")
 
 # litellm addresses the Gemini Developer API (generativelanguage.googleapis.com)
 # as "gemini/<model>"; Vertex AI models are priced under a different prefix.
