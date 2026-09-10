@@ -48,6 +48,7 @@ Rules:
 - Work-end labels may appear as TERMINO/TRABALHO, TERMINO, SAIDA, HORA TERMINO, LARGADA, CHEGADA GARAGEM or CONTAS.
 - Ignore dates/times from signatures, electronic validation text, printed protocol text, QR codes, page numbers, addresses, phone numbers, totals, intervals, and footer/header metadata.
 - Do not infer sequential dates. Do not duplicate a single-service page into multiple days.
+- The number of work-start and work-end must match. If they do not match, return the earliest work-start with the latest work-end for each pair. For example, if a file has 2 work-start and 3 work-end we gonna consider the first pair and on the second we get the latest work-end.
 - If the relevant date or work times are not readable, return {"rows":[]}.
 Return ONLY JSON, no markdown."""
 
