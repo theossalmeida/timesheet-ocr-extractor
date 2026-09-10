@@ -7,13 +7,28 @@ import pytest
 from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
-    _extract_records_from_text,
     _record_from_row,
+    _single_page_pdf,
     _split_pdf_chunks,
     extract_with_guia_ministerial,
     stream_guia_extraction,
 )
+from services.local_vision_ocr_service import GuiaLocalRun, GuiaPageOutcome
 from models.timesheet import TimesheetRow
+
+
+def _local_run(pages, *, confidence=1.0, passed=True, reason=None):
+    """A finished local read: `pages` is a list of (page_number, record)."""
+    return GuiaLocalRun(
+        confidence=confidence,
+        passed=passed,
+        outcomes=[GuiaPageOutcome(number, record, confidence) for number, record in pages],
+        reason=reason,
+    )
+
+
+def _guia_record(date="01/03/2024", entrada="08:00", saida="17:00"):
+    return {"data": date, "entrada": entrada, "saida": saida}
 
 
 @pytest.fixture
@@ -136,111 +151,99 @@ def test_aggregate_hhmm_time_format():
     assert rows[0].marcacoes[1] == "17:00"
 
 
-# ── _extract_records_from_text (local OCR parser) ────────────────────────────
+# ── _single_page_pdf ──────────────────────────────────────────────────────────
 
-def test_extract_records_from_text_finds_date_and_times():
-    text = "25/01/2024 Hora Entrada 06:30 Hora Saida 14:50"
-    records = _extract_records_from_text(text)
-    assert records == [{"data": "25/01/2024", "entrada": "06:30", "saida": "14:50"}]
-
-
-def test_extract_records_from_text_uses_earliest_and_latest_time_on_line():
-    text = "01/03/2024 08:00 12:00 13:00 17:00"
-    records = _extract_records_from_text(text)
-    assert records == [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+def test_single_page_pdf_extracts_one_page():
+    page = _single_page_pdf(_make_minimal_pdf(5), 3)
+    assert len(pypdf.PdfReader(io.BytesIO(page)).pages) == 1
 
 
-def test_extract_records_from_text_expands_two_digit_year():
-    text = "05/02/24 07:00 15:00"
-    records = _extract_records_from_text(text)
-    assert records[0]["data"] == "05/02/2024"
-
-
-def test_extract_records_from_text_ignores_lines_without_times():
-    text = "25/01/2024 apenas uma data sem horario\noutra linha qualquer"
-    assert _extract_records_from_text(text) == []
-
-
-def test_extract_records_from_text_ignores_lines_without_dates():
-    text = "06:30 14:50 sem data nesta linha"
-    assert _extract_records_from_text(text) == []
-
-
-def test_extract_records_from_text_multiple_lines():
-    text = "01/03/2024 06:00 14:00\n02/03/2024 07:00 15:00"
-    records = _extract_records_from_text(text)
-    assert len(records) == 2
-    assert records[0]["data"] == "01/03/2024"
-    assert records[1]["data"] == "02/03/2024"
-
-
-# ── extract_with_guia_ministerial (mocked) ────────────────────────────────────
+# ── routing: local probe decides, Gemini covers what it cannot ────────────────
 
 @pytest.mark.anyio
-async def test_extract_calls_process_chunk_per_chunk():
-    pdf = _make_minimal_pdf(25)  # 3 chunks of 10+10+5
-    mock_records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+async def test_reads_the_document_locally_when_the_probe_is_confident():
+    pdf = _make_minimal_pdf(3)
+    run = _local_run([
+        (1, _guia_record("01/03/2024")),
+        (2, _guia_record("02/03/2024")),
+        (3, _guia_record("03/03/2024")),
+    ])
 
-    with patch("services.guia_ministerial_service._process_chunk_tesseract",
-               return_value=mock_records) as mock_call:
-        rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[])) as gemini_mock:
+        rows = await extract_with_guia_ministerial(pdf)
 
-    assert mock_call.call_count == 3
-    assert len(rows) == 1
-    assert rows[0].data == "01/03/2024"
+    gemini_mock.assert_not_awaited()
+    assert [row.data for row in rows] == ["01/03/2024", "02/03/2024", "03/03/2024"]
 
 
 @pytest.mark.anyio
-async def test_extract_merges_chunks():
-    pdf = _make_minimal_pdf(20)  # 2 chunks
+async def test_sends_the_whole_document_to_gemini_when_the_probe_is_weak():
+    pdf = _make_minimal_pdf(20)
+    run = _local_run([], confidence=0.83, passed=False, reason="probe confidence 83%")
 
-    chunk_results = [
-        [{"data": "01/03/2024", "entrada": "06:00", "saida": "14:00"}],
-        [{"data": "02/03/2024", "entrada": "06:00", "saida": "14:00"}],
-    ]
-
-    with patch("services.guia_ministerial_service._process_chunk_tesseract",
-               side_effect=chunk_results):
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[_guia_record()])) as gemini_mock:
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 
-    assert len(rows) == 2
-    assert rows[0].data == "01/03/2024"
-    assert rows[1].data == "02/03/2024"
-
-@pytest.mark.anyio
-async def test_extract_falls_back_to_local_vision_when_tesseract_empty():
-    pdf = _make_minimal_pdf(1)
-    mock_records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
-
-    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
-         patch(
-             "services.guia_ministerial_service._process_chunk_local_vision",
-             new=AsyncMock(return_value=mock_records),
-         ) as vision_mock:
-        rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
-
-    vision_mock.assert_awaited_once()
-    assert len(rows) == 1
-    assert rows[0].data == "01/03/2024"
+    assert gemini_mock.await_count == 2  # one call per chunk of the whole file
     assert rows[0].marcacoes == ["08:00", "17:00"]
 
 
 @pytest.mark.anyio
-async def test_extract_prefers_gemini_over_local_vision_when_tesseract_is_empty():
-    pdf = _make_minimal_pdf(1)
-    records = [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+async def test_retries_only_the_page_the_local_model_could_not_read():
+    """A late failure costs one page of Gemini, not the whole document."""
 
-    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
+    pdf = _make_minimal_pdf(3)
+    run = _local_run([
+        (1, _guia_record("01/03/2024")),
+        (2, None),
+        (3, _guia_record("03/03/2024")),
+    ])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
          patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=records)) as gemini_mock, \
-         patch("services.guia_ministerial_service._process_chunk_local_vision",
-               new=AsyncMock(return_value=[])) as vision_mock:
-        rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
+               new=AsyncMock(return_value=[_guia_record("02/03/2024")])) as gemini_mock:
+        rows = await extract_with_guia_ministerial(pdf)
 
     gemini_mock.assert_awaited_once()
-    vision_mock.assert_not_awaited()
+    retried = gemini_mock.await_args.args[0]
+    assert len(pypdf.PdfReader(io.BytesIO(retried)).pages) == 1
+    assert [row.data for row in rows] == ["01/03/2024", "02/03/2024", "03/03/2024"]
+
+
+@pytest.mark.anyio
+async def test_uses_gemini_when_local_vision_is_unavailable():
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=None)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[_guia_record()])) as gemini_mock:
+        rows = await extract_with_guia_ministerial(_make_minimal_pdf(1))
+
+    gemini_mock.assert_awaited_once()
     assert len(rows) == 1
-    assert rows[0].marcacoes == ["08:00", "17:00"]
+
+
+@pytest.mark.anyio
+async def test_never_reads_a_guia_with_text_ocr():
+    """Regression: a guia's only readable text is its signature footer.
+
+    Scraping it produced the signing date and time as the work date and both
+    punches, so the guia path must reach a vision model or return nothing.
+    """
+
+    import services.tesseract_ocr_service as tesseract
+
+    footer = [(1, "Documento assinado eletronicamente por FULANO, em 28/08/2026, as 13:25:53")]
+    with patch.object(tesseract, "ocr_pdf_page_texts", return_value=footer) as ocr_mock, \
+         patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=None)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[])):
+        rows = await extract_with_guia_ministerial(_make_minimal_pdf(1))
+
+    ocr_mock.assert_not_called()
+    assert rows == []
 
 
 def test_record_from_row_maps_a_single_service_form():
@@ -259,6 +262,44 @@ def test_record_from_row_without_a_second_punch():
     assert _record_from_row(TimesheetRow(data="01/03/2024", marcacoes=["07:30"]))["saida"] is None
 
 
+# ── streaming ────────────────────────────────────────────────────────────────
+
+async def _stream_events(pdf, stem="504"):
+    events = []
+    async for chunk in stream_guia_extraction(pdf, stem):
+        for line in chunk.splitlines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[6:]))
+    return events
+
+
+@pytest.mark.anyio
+async def test_stream_reports_local_as_the_provider_when_the_probe_passes():
+    run = _local_run([(1, _guia_record())])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[])) as gemini_mock:
+        events = await _stream_events(_make_minimal_pdf(1))
+
+    gemini_mock.assert_not_awaited()
+    assert events[-1]["provider"] == "local-vision-guia"
+    assert events[-1]["rows_extracted"] == 1
+
+
+@pytest.mark.anyio
+async def test_stream_reports_both_providers_when_a_page_falls_back():
+    run = _local_run([(1, _guia_record("01/03/2024")), (2, None)])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini",
+               new=AsyncMock(return_value=[_guia_record("02/03/2024")])):
+        events = await _stream_events(_make_minimal_pdf(2))
+
+    assert events[-1]["provider"] == "local-vision-guia+gemini-guia"
+    assert events[-1]["rows_extracted"] == 2
+
+
 @pytest.mark.anyio
 async def test_stream_meters_gemini_and_reports_it_as_the_provider():
     from services import ai_usage
@@ -267,15 +308,12 @@ async def test_stream_meters_gemini_and_reports_it_as_the_provider():
         ai_usage.record("gemini", "gemini-3.1-pro-preview", "extract",
                         {"prompt_tokens": 1000, "cached_tokens": 0, "output_tokens": 500,
                          "thought_tokens": 0, "total_tokens": 1500})
-        return [{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}]
+        return [_guia_record()]
 
-    events = []
-    with patch("services.guia_ministerial_service._process_chunk_tesseract", return_value=[]), \
+    weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
          patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
-        async for chunk in stream_guia_extraction(_make_minimal_pdf(1), "504"):
-            for line in chunk.splitlines():
-                if line.startswith("data: "):
-                    events.append(json.loads(line[6:]))
+        events = await _stream_events(_make_minimal_pdf(1))
 
     done = events[-1]
     assert done["type"] == "done"

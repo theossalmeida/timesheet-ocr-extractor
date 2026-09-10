@@ -107,8 +107,12 @@ def _pick_languages() -> str:
     return "+".join(langs)
 
 
-def _render_pdf_pages(pdf_bytes: bytes, dpi: int = TESSERACT_DPI):
-    """Render every page of a PDF to a PIL Image using PyMuPDF (fitz).
+def _render_pdf_pages(pdf_bytes: bytes, dpi: int = TESSERACT_DPI, page_indices=None):
+    """Render PDF pages to PIL Images using PyMuPDF (fitz).
+
+    `page_indices` renders only those zero-based pages, in the order given, so
+    a caller that inspects a couple of pages before deciding what to do with a
+    document does not pay to rasterize all of it.
 
     PyMuPDF bundles its own PDF renderer (no Poppler/pdftoppm install
     required on the host), which keeps the Windows setup to just:
@@ -123,7 +127,10 @@ def _render_pdf_pages(pdf_bytes: bytes, dpi: int = TESSERACT_DPI):
     matrix = fitz.Matrix(zoom, zoom)
     images = []
     try:
-        for page_index in range(len(doc)):
+        wanted = range(len(doc)) if page_indices is None else page_indices
+        for page_index in wanted:
+            if not 0 <= page_index < len(doc):
+                continue
             page = doc.load_page(page_index)
             pix = page.get_pixmap(matrix=matrix)
             image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)

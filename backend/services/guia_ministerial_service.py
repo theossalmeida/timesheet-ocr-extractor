@@ -3,7 +3,6 @@ import asyncio
 import io
 import json
 import logging
-import re
 
 import pypdf
 
@@ -13,25 +12,18 @@ from models.timesheet import TimesheetRow
 from services import ai_usage
 from utils.normalizers import normalize_date, normalize_time
 
-CHUNK_SIZE = 20  # pages per local-OCR request (keeps progress updates granular)
+CHUNK_SIZE = 20  # pages per Gemini request (keeps progress updates granular)
 
-# Guia Ministerial / Papeleta de Serviço Externo documents use loose,
-# inconsistent field labels for entrada/saída (e.g. "hora entrada", "hora
-# início", "saída da garagem"). Without a vision-capable model to read those
-# labels semantically, the local OCR path instead falls back to a simpler
-# (and more limited) heuristic: for every date found on a line, take every
-# HH:MM-shaped time on that same line and use the earliest as entrada and the
-# latest as saída - mirroring the old "always earliest=entrada, latest=saida"
-# aggregation rule, just without label awareness.
+# Guia Ministerial / Papeleta de Servico Externo forms are filled in by hand.
+# The only machine-readable text on a scanned guia is usually the electronic
+# signature footer and the page number stamped by the court system, so text
+# extraction does not read the form - it reads the footer, and reports the
+# signing date and time as the work date and punches. This pipeline therefore
+# never scrapes text for guias: a vision model reads the form, or nothing does.
 #
-# IMPORTANT LIMITATION: many real Guia Ministerial forms are filled out by
-# hand. Tesseract is a printed-text OCR engine and does not reliably read
-# handwriting - this path works reasonably well for typed/printed guias, but
-# will likely miss or misread handwritten ones. There is no local, free
-# equivalent to a handwriting-capable vision model; this trade-off should be
-# revisited if handwritten guias are common in practice.
-_DATE_TOKEN_RE = re.compile(r"\b(\d{2})[/\-.](\d{2})[/\-.](\d{2,4})\b")
-_TIME_TOKEN_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+# A local model reads a short probe first. Only if it grades that probe highly
+# does the rest of the document stay local; otherwise the whole document goes
+# to Gemini, and single pages the local model cannot read go to Gemini too.
 
 
 class GuiaExtractionError(Exception):
@@ -52,97 +44,35 @@ def _split_pdf_chunks(pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE) -> list[by
     return chunks
 
 
-def _extract_records_from_text(text: str) -> list[dict]:
-    """Find "DD/MM/YYYY ... HH:MM ... HH:MM" style lines in OCR'd text and
-    turn each into a raw {"data", "entrada", "saida"} record (earliest time
-    on the line = entrada, latest = saida).
-    """
-    records: list[dict] = []
-    for line in text.splitlines():
-        date_match = _DATE_TOKEN_RE.search(line)
-        if not date_match:
-            continue
-        dd, mm, yy = date_match.groups()
-        year = f"20{yy}" if len(yy) == 2 else yy
-        data_str = f"{dd}/{mm}/{year}"
-
-        times = [f"{h.zfill(2)}:{m}" for h, m in _TIME_TOKEN_RE.findall(line)]
-        if not times:
-            continue
-
-        records.append({
-            "data": data_str,
-            "entrada": min(times),
-            "saida": max(times),
-        })
-    return records
+def _single_page_pdf(pdf_bytes: bytes, page_number: int) -> bytes:
+    """One page as its own PDF, so a page the local model fails can be retried."""
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    writer = pypdf.PdfWriter()
+    writer.add_page(reader.pages[page_number - 1])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-def _process_chunk_tesseract(chunk_bytes: bytes) -> list[dict]:
-    """OCR a PDF chunk locally with Tesseract and extract raw records.
-    Never raises - returns [] when Tesseract is unavailable, the bytes
-    aren't a renderable PDF, or no page yields a match.
-    """
-    try:
-        from services.tesseract_ocr_service import (
-            TesseractOCRError,
-            is_tesseract_available,
-            ocr_pdf_page_texts,
-        )
-    except ImportError as e:
-        logger.debug("guia: tesseract OCR dependencies not installed: %s", e)
-        return []
-
-    if not is_tesseract_available():
-        logger.debug("guia: Tesseract binary not found, skipping local OCR")
-        return []
-
-    try:
-        page_texts = ocr_pdf_page_texts(chunk_bytes)
-    except TesseractOCRError as e:
-        logger.warning("guia: Tesseract OCR failed: %s", e)
-        return []
-    except Exception as e:
-        logger.warning("guia: Tesseract OCR raised unexpected error: %s", e)
-        return []
-
-    records: list[dict] = []
-    for page_index, text in page_texts:
-        page_records = _extract_records_from_text(text)
-        if page_records:
-            logger.info(
-                "guia: Tesseract OCR - page %d found %d record(s)",
-                page_index, len(page_records),
-            )
-        records.extend(page_records)
-    return records
-
-
-
-async def _process_chunk_local_vision(chunk_bytes: bytes) -> list[dict]:
-    """Use the optional local vision model when Tesseract finds no records."""
+async def _run_local(pdf_bytes: bytes):
+    """Read the document locally. Returns None when local reading is unusable."""
     try:
         from services.local_vision_ocr_service import (
             LocalVisionOCRError,
-            extract_guia_records_local_vision,
-            is_local_vision_ocr_configured,
+            run_guia_local,
         )
     except ImportError as e:
         logger.debug("guia: local vision OCR dependencies not installed: %s", e)
-        return []
-
-    if not is_local_vision_ocr_configured():
-        logger.debug("guia: local vision OCR is not configured, skipping")
-        return []
+        return None
 
     try:
-        return await extract_guia_records_local_vision(chunk_bytes)
+        return await run_guia_local(pdf_bytes)
     except LocalVisionOCRError as e:
         logger.warning("guia: local vision OCR failed: %s", e)
-        return []
+        return None
     except Exception as e:
         logger.warning("guia: local vision OCR raised unexpected error: %s", e)
-        return []
+        return None
 
 
 def _record_from_row(row: TimesheetRow) -> dict:
@@ -233,6 +163,13 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     return rows
 
 
+async def _gemini_whole_document(pdf_bytes: bytes, chunk_size: int) -> list[dict]:
+    records: list[dict] = []
+    for chunk in _split_pdf_chunks(pdf_bytes, chunk_size):
+        records.extend(await _process_chunk_gemini(chunk))
+    return records
+
+
 async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_size: int = CHUNK_SIZE):
     """Async generator yielding SSE strings for the guia ministerial extraction."""
     import json as _json
@@ -240,44 +177,76 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
     from services.excel_builder import build_guia_excel
     from services.csv_builder import build_guia_csv
 
+    def progress(step: str, message: str) -> str:
+        return f"data: {_json.dumps({'type': 'progress', 'step': step, 'message': message})}\n\n"
+
+    async def drain(coro):
+        """Run `coro`, holding the SSE connection open while it works.
+
+        Waits on the task rather than polling it, so a step that finishes
+        quickly costs nothing and only a genuinely slow one emits keep-alives.
+        """
+        task = asyncio.create_task(coro)
+        while True:
+            try:
+                yield await asyncio.wait_for(asyncio.shield(task), timeout=15)
+                return
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+
     try:
         with ai_usage.recording() as ai_calls:
-            chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
-            total = len(chunks)
             all_records: list[dict] = []
             used: list[str] = []
 
-            for i, chunk in enumerate(chunks):
-                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total}...'})}\n\n"
+            yield progress("local-vision", "IA local: lendo as primeiras paginas da guia...")
+            run = None
+            async for item in drain(_run_local(pdf_bytes)):
+                if isinstance(item, str):
+                    yield item
+                else:
+                    run = item
 
-                task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
-                while not task.done():
-                    yield ": keep-alive\n\n"
-                    await asyncio.sleep(15)
-
-                records = task.result()
-                engine = "tesseract-guia" if records else ""
-
-                # Handwritten guias defeat Tesseract, so fall back the same way
-                # the cartao pipeline does: Gemini first, local vision last.
-                for step, label, factory in (
-                    ("gemini", "IA (Gemini)", _process_chunk_gemini),
-                    ("local-vision", "IA local", _process_chunk_local_vision),
-                ):
-                    if records:
-                        break
-                    yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total, 'step': step, 'message': f'OCR com {label}: processando parte {i + 1} de {total}...'})}\n\n"
-                    fallback = asyncio.create_task(factory(chunk))
-                    while not fallback.done():
-                        yield ": keep-alive\n\n"
-                        await asyncio.sleep(15)
-                    records = fallback.result()
-                    if records:
-                        engine = step + "-guia"
-
-                if engine and engine not in used:
-                    used.append(engine)
-                all_records.extend(records)
+            if run is not None and run.passed:
+                used.append("local-vision-guia")
+                logger.info(
+                    "guia: local probe passed at %.0f%%; %d page(s) read locally",
+                    run.confidence * 100, len(run.outcomes),
+                )
+                # Pages the local model could not read are retried individually
+                # rather than sending the whole document back to a paid model.
+                for outcome in run.outcomes:
+                    if outcome.record:
+                        all_records.append(outcome.record)
+                        continue
+                    yield progress(
+                        "gemini",
+                        f"IA (Gemini): relendo a pagina {outcome.page_number}...",
+                    )
+                    page_pdf = _single_page_pdf(pdf_bytes, outcome.page_number)
+                    async for item in drain(_process_chunk_gemini(page_pdf)):
+                        if isinstance(item, str):
+                            yield item
+                        else:
+                            if item and "gemini-guia" not in used:
+                                used.append("gemini-guia")
+                            all_records.extend(item)
+            else:
+                reason = run.reason if run is not None else "IA local indisponivel"
+                logger.info("guia: local reading rejected (%s); using Gemini", reason)
+                chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
+                for i, chunk in enumerate(chunks):
+                    yield progress(
+                        "gemini",
+                        f"IA (Gemini): processando parte {i + 1} de {len(chunks)}...",
+                    )
+                    async for item in drain(_process_chunk_gemini(chunk)):
+                        if isinstance(item, str):
+                            yield item
+                        else:
+                            if item and "gemini-guia" not in used:
+                                used.append("gemini-guia")
+                            all_records.extend(item)
 
             rows = _aggregate(all_records)
 
@@ -297,7 +266,7 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                 "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
                 "csv_mime": csv_mime,
                 "rows_extracted": len(rows),
-                "provider": "+".join(used) or "tesseract-guia",
+                "provider": "+".join(used) or "gemini-guia",
                 "ai_usage": list(ai_calls),
             }, ensure_ascii=False) + "\n\n"
 
@@ -310,22 +279,30 @@ async def extract_with_guia_ministerial(
     pdf_bytes: bytes, chunk_size: int = CHUNK_SIZE
 ) -> list[TimesheetRow]:
     logger.info("guia: starting extraction - pdf_size=%d bytes", len(pdf_bytes))
-    chunks = _split_pdf_chunks(pdf_bytes, chunk_size=chunk_size)
-    logger.info("guia: split into %d chunks of up to %d pages", len(chunks), chunk_size)
 
-    all_records: list[dict] = []
-    for i, chunk in enumerate(chunks):
-        logger.info("guia: processing chunk %d/%d - %d bytes", i + 1, len(chunks), len(chunk))
-        records = await asyncio.to_thread(_process_chunk_tesseract, chunk)
-        if not records:
-            logger.info("guia: chunk %d had no Tesseract records; trying Gemini", i + 1)
-            records = await _process_chunk_gemini(chunk)
-        if not records:
-            logger.info("guia: chunk %d still empty; trying local vision OCR", i + 1)
-            records = await _process_chunk_local_vision(chunk)
-        logger.info("guia: chunk %d -> %d records", i + 1, len(records))
-        all_records.extend(records)
+    run = await _run_local(pdf_bytes)
+    if run is not None and run.passed:
+        logger.info(
+            "guia: local probe passed at %.0f%%; %d page(s) read locally",
+            run.confidence * 100, len(run.outcomes),
+        )
+        records: list[dict] = []
+        for outcome in run.outcomes:
+            if outcome.record:
+                records.append(outcome.record)
+                continue
+            logger.info(
+                "guia: page %d unreadable locally; retrying it with Gemini",
+                outcome.page_number,
+            )
+            records.extend(
+                await _process_chunk_gemini(_single_page_pdf(pdf_bytes, outcome.page_number))
+            )
+    else:
+        reason = run.reason if run is not None else "local vision OCR unavailable"
+        logger.info("guia: local reading rejected (%s); using Gemini", reason)
+        records = await _gemini_whole_document(pdf_bytes, chunk_size)
 
-    rows = _aggregate(all_records)
+    rows = _aggregate(records)
     logger.info("guia: done - total_rows=%d", len(rows))
     return rows

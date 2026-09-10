@@ -214,15 +214,27 @@ def _render_full_page_images(pdf_bytes: bytes):
     ]
 
 
-def _render_crop_page_images(pdf_bytes: bytes):
+def _render_crop_page_images(pdf_bytes: bytes, page_indices=None):
     from services.tesseract_ocr_service import _render_pdf_pages
 
     return [
         _preprocess_image_for_vision(image)
         for image in _render_pdf_pages(
-            pdf_bytes, dpi=max(settings.LOCAL_VISION_OCR_DPI, 300)
+            pdf_bytes,
+            dpi=max(settings.LOCAL_VISION_OCR_DPI, 300),
+            page_indices=page_indices,
         )
     ]
+
+
+def _page_count(pdf_bytes: bytes) -> int:
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return len(doc)
+    finally:
+        doc.close()
 
 
 def _crop_image(image, template: _CropTemplate):
@@ -472,9 +484,11 @@ def _looks_like_service_form_evidence(raw: dict[str, Any]) -> bool:
     )
 
     data_ok = "data" in data_source or "date" in data_source
+    # "escala"/"garagem" cover the Papeleta de Servico Externo header
+    # "HORA ESCALA / GARAGEM - PONTO", which names neither entrada nor inicio.
     entrada_ok = any(
         token in entrada_source
-        for token in ("inicio", "entrada", "pegada", "saida garagem")
+        for token in ("inicio", "entrada", "pegada", "escala", "garagem")
     )
     saida_ok = any(
         token in saida_source
@@ -610,7 +624,10 @@ def _consensus_service_records(candidates: list[dict]) -> tuple[list[dict], bool
     return [], True
 
 
-def _best_template_name(template_scores: dict[str, dict[str, int]]) -> str | None:
+def _best_template_name(
+    template_scores: dict[str, dict[str, int]],
+    template_keys: dict[str, list] | None = None,
+) -> str | None:
     viable = [
         (name, score["pages"], score["confidence"])
         for name, score in template_scores.items()
@@ -621,13 +638,25 @@ def _best_template_name(template_scores: dict[str, dict[str, int]]) -> str | Non
 
     viable.sort(key=lambda item: (item[1], item[2]), reverse=True)
     best = viable[0]
-    if len(viable) > 1 and (viable[1][1], viable[1][2]) == (best[1], best[2]):
-        return None
-    return best[0]
+    tied = [item for item in viable if (item[1], item[2]) == (best[1], best[2])]
+    if len(tied) == 1:
+        return best[0]
+
+    # Crops that tie because they read the same values are agreeing, not
+    # ambiguous. Only a genuine disagreement is unresolvable. This matters most
+    # on a one-page guia, where a single sampled page ties nearly every crop.
+    if template_keys:
+        agreed = {tuple(template_keys.get(name) or ()) for name, _, _ in tied}
+        if len(agreed) == 1 and agreed != {()}:
+            order = [template.name for template in _SERVICE_CROP_TEMPLATES]
+            return min((name for name, _, _ in tied), key=order.index)
+    return None
 
 
-async def _select_service_crop_template(crop_images) -> tuple[_CropTemplate | None, bool]:
-    sample_count = min(_SAMPLE_PAGES, len(crop_images))
+async def _select_service_crop_template(
+    crop_images, sample_count: int | None = None
+) -> tuple[_CropTemplate | None, bool]:
+    sample_count = min(sample_count or _SAMPLE_PAGES, len(crop_images))
     if sample_count == 0:
         return None, False
 
@@ -636,6 +665,7 @@ async def _select_service_crop_template(crop_images) -> tuple[_CropTemplate | No
         for template in _SERVICE_CROP_TEMPLATES
     }
     attempted = False
+    keys_by_template: dict[str, list] = {name: [] for name in scores}
     for page_image in crop_images[:sample_count]:
         page_keys: dict[str, tuple[str, str, str]] = {}
         for template in _SERVICE_CROP_TEMPLATES:
@@ -654,6 +684,7 @@ async def _select_service_crop_template(crop_images) -> tuple[_CropTemplate | No
             if key is None:
                 continue
             page_keys[template.name] = key
+            keys_by_template[template.name].append(key)
             scores[template.name]["pages"] += 1
             scores[template.name]["confidence"] += int(record.get("_confidence_score") or 1)
 
@@ -663,7 +694,7 @@ async def _select_service_crop_template(crop_images) -> tuple[_CropTemplate | No
                 page_keys,
             )
 
-    best_name = _best_template_name(scores)
+    best_name = _best_template_name(scores, keys_by_template)
     if best_name is None:
         return None, attempted
 
@@ -738,36 +769,101 @@ async def extract_timesheet_rows_local_vision(pdf_bytes: bytes) -> list[Timeshee
     return rows
 
 
-async def extract_guia_records_local_vision(pdf_bytes: bytes) -> list[dict]:
+GUIA_PROBE_PAGES = 2
+GUIA_CONFIDENCE_THRESHOLD = 0.9
+
+
+@dataclass
+class GuiaPageOutcome:
+    page_number: int
+    record: dict | None
+    confidence: float
+
+
+@dataclass
+class GuiaLocalRun:
+    """Result of reading a guia locally, and whether it was trustworthy."""
+
+    confidence: float
+    passed: bool
+    outcomes: list[GuiaPageOutcome]
+    reason: str | None = None
+
+
+def _page_confidence(record: dict | None) -> float:
+    """Score one page from the label the model reported for it.
+
+    The model grades itself coarsely (high/medium/low), so a page is worth
+    1.0, 2/3, or 0, and 1/3 when it declined to say. A record missing the
+    date, entrada or saida scores 0 whatever the label claims: a confidently
+    half-read form is still unusable.
+    """
+    if not record:
+        return 0.0
+    if not (record.get("data") and record.get("entrada") and record.get("saida")):
+        return 0.0
+    score = record.get("_confidence_score")
+    # `low` scores 0, which must not be mistaken for an absent grade.
+    return (1 if score is None else int(score)) / 3
+
+
+async def _guia_page_outcome(page_image, template, page_number: int) -> GuiaPageOutcome:
+    records, _ = await _service_form_record_from_template(page_image, template)
+    record = records[0] if records else None
+    return GuiaPageOutcome(page_number, record, _page_confidence(record))
+
+
+async def run_guia_local(
+    pdf_bytes: bytes,
+    *,
+    probe_pages: int = GUIA_PROBE_PAGES,
+    threshold: float = GUIA_CONFIDENCE_THRESHOLD,
+) -> GuiaLocalRun:
+    """Read a guia locally, but only after a short probe proves it readable.
+
+    Guias are handwritten forms whose only machine-readable text is often the
+    electronic signature footer, so there is no safe text-scraping path: a
+    vision model has to read them. This reads the first few pages, and leaves
+    it to the caller to send the document to a paid model when that probe is
+    not convincing enough.
+    """
     if not is_local_vision_ocr_configured():
-        return []
+        return GuiaLocalRun(0.0, False, [], "local vision OCR is not configured")
 
-    crop_images = _render_crop_page_images(pdf_bytes)
-    template, attempted = await _select_service_crop_template(crop_images)
+    total = _page_count(pdf_bytes)
+    if total == 0:
+        return GuiaLocalRun(0.0, False, [], "document has no pages")
+
+    probe_count = max(1, min(probe_pages, total))
+    probe_images = _render_crop_page_images(pdf_bytes, range(probe_count))
+    template, attempted = await _select_service_crop_template(
+        probe_images, sample_count=probe_count
+    )
     if template is None:
-        if attempted:
-            logger.warning(
-                "local vision OCR: no reliable service-form crop template selected"
-            )
-        return []
-
-    records: list[dict] = []
-    for page_index, page_image in enumerate(crop_images, start=1):
-        page_records, page_attempted = await _service_form_record_from_template(
-            page_image, template
+        return GuiaLocalRun(
+            0.0, False, [],
+            "no stable service-form crop template"
+            if attempted else "no service-form fields found",
         )
-        if page_records:
-            logger.info(
-                "local vision OCR: page %d found %d guia record(s) with template %s",
-                page_index,
-                len(page_records),
-                template.name,
-            )
-        elif page_attempted:
-            logger.warning(
-                "local vision OCR: page %d service-form template %s returned inconsistent fields",
-                page_index,
-                template.name,
-            )
-        records.extend(page_records)
-    return records
+
+    outcomes = [
+        await _guia_page_outcome(image, template, number)
+        for number, image in enumerate(probe_images, start=1)
+    ]
+    confidence = sum(o.confidence for o in outcomes) / len(outcomes)
+    logger.info(
+        "local vision OCR: guia probe read %d page(s) at %.0f%% confidence",
+        len(outcomes), confidence * 100,
+    )
+    if confidence <= threshold:
+        return GuiaLocalRun(
+            confidence, False, [], f"probe confidence {confidence:.0%}"
+        )
+
+    # The probe pages are already read; only the remainder still needs a call.
+    if total > probe_count:
+        rest = _render_crop_page_images(pdf_bytes, range(probe_count, total))
+        for number, image in enumerate(rest, start=probe_count + 1):
+            outcomes.append(await _guia_page_outcome(image, template, number))
+
+    return GuiaLocalRun(confidence, True, outcomes)

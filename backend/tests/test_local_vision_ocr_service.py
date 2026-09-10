@@ -1,7 +1,12 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from services.local_vision_ocr_service import (
+    _looks_like_service_form_evidence,
+    _page_confidence,
+    run_guia_local,
     _lmstudio_base_url,
     _call_lmstudio,
     _resolved_provider,
@@ -246,3 +251,159 @@ def test_rows_from_payload_converts_single_service_records():
     assert len(rows) == 1
     assert rows[0].data == "08/08/2022"
     assert rows[0].marcacoes == ["13:30", "23:02"]
+
+# ── guia probe gate ──────────────────────────────────────────────────────────
+
+def _record(confidence_score, *, entrada="14:50", saida="22:07", data="01/07/2021"):
+    return {
+        "data": data, "entrada": entrada, "saida": saida,
+        "_confidence_score": confidence_score,
+    }
+
+
+def test_page_confidence_grades_the_model_self_report():
+    assert _page_confidence(_record(3)) == 1.0            # high
+    assert _page_confidence(_record(2)) == pytest.approx(2 / 3)   # medium
+    assert _page_confidence(_record(1)) == pytest.approx(1 / 3)   # unstated
+    assert _page_confidence(_record(0)) == 0.0            # low
+
+
+def test_page_confidence_rejects_an_unread_page():
+    assert _page_confidence(None) == 0.0
+
+
+def test_page_confidence_rejects_a_confident_but_incomplete_record():
+    """A form read as "high" with no exit time is still unusable."""
+
+    assert _page_confidence(_record(3, saida=None)) == 0.0
+    assert _page_confidence(_record(3, entrada=None)) == 0.0
+    assert _page_confidence(_record(3, data=None)) == 0.0
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+def _probe(monkeypatch, page_records, *, pages=2):
+    """Drive run_guia_local with a fixed template and per-page records."""
+    import services.local_vision_ocr_service as service
+
+    monkeypatch.setattr(service, "is_local_vision_ocr_configured", lambda: True)
+    monkeypatch.setattr(service, "_page_count", lambda pdf_bytes: pages)
+    monkeypatch.setattr(
+        service, "_render_crop_page_images",
+        lambda pdf_bytes, page_indices=None: [object() for _ in (page_indices or range(pages))],
+    )
+    monkeypatch.setattr(
+        service, "_select_service_crop_template",
+        AsyncMock(return_value=(service._SERVICE_CROP_TEMPLATES[0], True)),
+    )
+    queue = list(page_records)
+    monkeypatch.setattr(
+        service, "_service_form_record_from_template",
+        AsyncMock(side_effect=lambda image, template: ([queue.pop(0)] if queue and queue[0] else [], True)),
+    )
+
+
+@pytest.mark.anyio
+async def test_guia_probe_passes_when_every_probed_page_is_high(monkeypatch):
+    _probe(monkeypatch, [_record(3), _record(3)])
+
+    run = await run_guia_local(b"pdf")
+
+    assert run.passed is True
+    assert run.confidence == 1.0
+    assert len(run.outcomes) == 2
+
+
+@pytest.mark.anyio
+async def test_guia_probe_fails_when_one_probed_page_is_only_medium(monkeypatch):
+    _probe(monkeypatch, [_record(3), _record(2)])
+
+    run = await run_guia_local(b"pdf")
+
+    assert run.passed is False
+    assert run.confidence == pytest.approx(5 / 6)
+    assert run.outcomes == []
+    assert "83%" in run.reason
+
+
+@pytest.mark.anyio
+async def test_guia_probe_fails_when_a_probed_page_is_unreadable(monkeypatch):
+    _probe(monkeypatch, [_record(3), None])
+
+    run = await run_guia_local(b"pdf")
+
+    assert run.passed is False
+    assert run.confidence == 0.5
+
+
+@pytest.mark.anyio
+async def test_guia_probe_covers_a_single_page_document(monkeypatch):
+    """The example guia is one page, so the probe is the whole document."""
+
+    _probe(monkeypatch, [_record(3)], pages=1)
+
+    run = await run_guia_local(b"pdf")
+
+    assert run.passed is True
+    assert [outcome.page_number for outcome in run.outcomes] == [1]
+
+
+@pytest.mark.anyio
+async def test_guia_probe_is_skipped_when_local_vision_is_not_configured(monkeypatch):
+    import services.local_vision_ocr_service as service
+
+    monkeypatch.setattr(service, "is_local_vision_ocr_configured", lambda: False)
+
+    run = await run_guia_local(b"pdf")
+
+    assert run.passed is False
+    assert run.reason == "local vision OCR is not configured"
+
+
+# ── which crop wins, and which fields count as evidence ──────────────────────
+
+def test_tied_crops_that_read_the_same_values_pick_one():
+    """A one-page guia samples one page, so nearly every crop ties."""
+
+    scores = {
+        "top_wide": {"pages": 1, "confidence": 3},
+        "body_wide": {"pages": 1, "confidence": 3},
+    }
+    keys = {"top_wide": [("01/07/2021", "14:50", "22:07")],
+            "body_wide": [("01/07/2021", "14:50", "22:07")]}
+
+    assert _best_template_name(scores, keys) == "top_wide"  # widest crop wins
+
+
+def test_tied_crops_that_disagree_still_select_nothing():
+    scores = {
+        "top_wide": {"pages": 1, "confidence": 3},
+        "body_wide": {"pages": 1, "confidence": 3},
+    }
+    keys = {"top_wide": [("01/07/2021", "14:50", "22:07")],
+            "body_wide": [("28/08/2026", "13:25", "13:25")]}
+
+    assert _best_template_name(scores, keys) is None
+
+
+def test_service_evidence_accepts_the_papeleta_start_column():
+    """This form labels its start time "HORA ESCALA / GARAGEM - PONTO"."""
+
+    assert _looks_like_service_form_evidence({
+        "data_source": "DATA field",
+        "entrada_source": "HORA ESCALA / GARAGEM - PONTO",
+        "saida_source": "TERMINO DO TRABALHO",
+    })
+
+
+def test_service_evidence_rejects_a_record_read_off_the_signature():
+    """The bug: the signing date and time read as the work date and punches."""
+
+    assert not _looks_like_service_form_evidence({
+        "data_source": "signature footer",
+        "entrada_source": "assinatura eletronica",
+        "saida_source": "assinatura eletronica",
+    })
