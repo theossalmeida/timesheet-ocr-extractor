@@ -1,87 +1,54 @@
 "use client";
 
-import { useState } from "react";
-import { useExtraction } from "@/hooks/useExtraction";
-import { ModeSelector } from "@/components/ModeSelector";
-import { UploadZone } from "@/components/UploadZone";
-import { ProgressIndicator } from "@/components/ProgressIndicator";
-import { ErrorMessage } from "@/components/ErrorMessage";
-import type { ExtractionMode } from "@/lib/types";
-
-const MODE_DESCRIPTIONS: Record<ExtractionMode, string> = {
-  cartao: "Faca upload do PDF de cartao de ponto e baixe a planilha Excel formatada.",
-  guia: "Faca upload do PDF com guias ministeriais ou papeletas e baixe o Excel com uma aba por motorista.",
-  contracheque: "Faca upload do PDF de contracheques da Petrobras e baixe a ficha salarial em Excel organizada por ano e mes.",
-  horas_extras: "Faca upload do PDF de contracheques da Petrobras e baixe uma planilha mensal apenas com verbas de horas extras.",
-  frequencia: "Faca upload do relatorio de frequencia da Petrobras e baixe a classificacao diaria de ciclos.",
-};
+import { useCallback, useEffect, useState } from "react";
+import { api, type Account, type Team } from "@/lib/client";
+import { AccountForm } from "@/components/AccountForm";
+import { Extractor } from "@/components/Extractor";
+import { TeamPanel } from "@/components/TeamPanel";
 
 export default function Home() {
-  const [mode, setMode] = useState<ExtractionMode>("cartao");
-  const extraction = useExtraction();
+  const [account, setAccount] = useState<Account | null>(null);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [teamId, setTeamId] = useState("");
+  const [tab, setTab] = useState("extract");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [invitation, setInvitation] = useState("");
+  const [error, setError] = useState("");
+  const team = teams.find(value => value.id === teamId);
 
-  const isActive = extraction.status !== "idle" && extraction.status !== "error";
+  const refresh = useCallback(async () => {
+    const result = await api<{ user: Account; teams: Team[] }>("/auth/me");
+    setAccount(result.user); setTeams(result.teams);
+    setTeamId(current => result.teams.some(team => team.id === current) ? current : result.teams[0]?.id ?? "");
+  }, []);
 
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-50 p-4">
-      <div className="w-full max-w-2xl">
-        <div className="mb-8 text-center">
-          <h1 className="text-2xl font-bold text-gray-900">
-            Extrator de Ponto
-          </h1>
-          <p className="mt-2 text-sm text-gray-500">
-            {MODE_DESCRIPTIONS[mode]}
-          </p>
-        </div>
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get("invite") ?? sessionStorage.getItem("autus_invite") ?? "";
+    setInvitation(token);
+    if (token) { sessionStorage.setItem("autus_invite", token); window.history.replaceState({}, "", "/"); }
+    const unauthorized = () => { setAccount(null); setTeams([]); setBusy(false); };
+    window.addEventListener("autus:unauthorized", unauthorized);
+    refresh().catch(() => undefined).finally(() => setLoading(false));
+    return () => window.removeEventListener("autus:unauthorized", unauthorized);
+  }, [refresh]);
 
-        <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-gray-200 flex flex-col gap-4">
-          <ModeSelector
-            mode={mode}
-            onChange={(m) => {
-              setMode(m);
-              if (extraction.status !== "idle") extraction.reset();
-            }}
-            disabled={isActive}
-          />
+  async function acceptInvite() {
+    setError("");
+    try { await api("/teams/invitations/accept", "POST", { token: invitation }); sessionStorage.removeItem("autus_invite"); setInvitation(""); await refresh(); }
+    catch (error) { setError(error instanceof Error ? error.message : "Não foi possível aceitar o convite."); }
+  }
 
-          {extraction.status !== "done" && (
-            <UploadZone
-              onFile={(file) => extraction.upload(file, mode)}
-              status={extraction.status}
-              mode={mode}
-            />
-          )}
+  async function signedIn(registered: boolean) {
+    await refresh();
+    if (registered && invitation) {
+      sessionStorage.removeItem("autus_invite"); setInvitation("");
+    }
+  }
 
-          {extraction.status !== "idle" && extraction.status !== "error" && (
-            <ProgressIndicator
-              status={extraction.status}
-              progress={extraction.progress}
-              stepLabel={extraction.stepLabel}
-              resultUrl={extraction.resultUrl}
-              excelFilename={extraction.excelFilename}
-              csvUrl={extraction.csvUrl}
-              csvExt={extraction.csvExt}
-              rowCount={extraction.rowCount}
-            />
-          )}
-
-          {extraction.status === "error" && (
-            <ErrorMessage
-              message={extraction.error ?? "Erro desconhecido."}
-              onRetry={extraction.reset}
-            />
-          )}
-
-          {extraction.status === "done" && (
-            <button
-              onClick={extraction.reset}
-              className="mt-2 w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-100"
-            >
-              Processar outro PDF
-            </button>
-          )}
-        </div>
-      </div>
-    </main>
-  );
+  return <div className="app-shell"><header className="nav app-nav"><div className="brand-lockup"><span className="nav-brand">AUTUS</span><span className="text-muted small tagline">Extração de documentos trabalhistas</span></div>{account && <><button className="btn btn-ghost" aria-current={tab === "extract" ? "page" : undefined} disabled={busy} onClick={() => setTab("extract")}>Extrair</button><button className="btn btn-ghost" aria-current={tab === "team" ? "page" : undefined} disabled={busy} onClick={() => setTab("team")}>Equipe</button>{teams.length > 0 && <select aria-label="Equipe ativa" className="input team-select" disabled={busy} value={teamId} onChange={event => setTeamId(event.target.value)}>{teams.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}</select>}<button className="btn btn-ghost small" disabled={busy} onClick={async () => { try { await api("/auth/logout", "POST"); setAccount(null); setTeams([]); } catch (error) { setError(error instanceof Error ? error.message : "Não foi possível sair."); } }}>Sair</button></>}</header>
+    {error && <p role="alert" className="error global-error">{error}</p>}
+    {loading ? <main className="login-main" role="status">Carregando AUTUS…</main> : !account ? <AccountForm invitation={invitation} onSuccess={signedIn} /> : <>{invitation && <div className="invite-banner"><span>Você recebeu um convite de equipe.</span><button className="btn btn-primary" onClick={() => void acceptInvite()}>Aceitar convite</button><button className="btn btn-ghost" onClick={() => { setInvitation(""); sessionStorage.removeItem("autus_invite"); }}>Dispensar</button></div>}{tab === "team" || !team ? <TeamPanel key={teamId} team={team} onTeamsChanged={refresh} /> : <Extractor key={team.id} team={team} onBusy={setBusy} />}</>}
+    {!account && <footer className="app-footer"><span>AUTUS · Documentos trabalhistas</span><span>Acesso privado por equipe</span></footer>}
+  </div>;
 }

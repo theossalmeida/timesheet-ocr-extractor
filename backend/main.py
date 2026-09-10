@@ -10,6 +10,7 @@ from accounts import router as accounts_router
 from database import initialize, pool
 from documents import router as documents_router, stored_stream, safe_filename, create_extraction, finish_extraction, fail_extraction, processing_lock
 from security import team
+from jobs import router as jobs_router, drain_jobs
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +61,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 async def lifespan(app):
     await asyncio.to_thread(initialize)
     yield
+    await drain_jobs()
     await asyncio.to_thread(pool.close)
 
 
@@ -74,7 +76,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "GET", "DELETE"],
+    allow_methods=["POST", "GET", "DELETE", "PUT"],
     allow_headers=["*"],
     expose_headers=["X-Provider-Used", "X-Rows-Extracted", "X-PDF-Type"],
 )
@@ -82,6 +84,7 @@ app.add_middleware(
 app.add_middleware(AccessMiddleware)
 app.include_router(accounts_router)
 app.include_router(documents_router)
+app.include_router(jobs_router)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

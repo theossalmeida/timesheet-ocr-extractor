@@ -32,8 +32,8 @@ Use one same-origin API proxy and a single persistent tunnel, with backend bound
 ## Checkpoint 4: Home server operation
 
 1. Identify the actual host, privileges, existing tunnel credentials and service tooling.
-2. Prepare production build and macOS system LaunchDaemons for frontend/backend/tunnel and sleep prevention; use an installation location outside Desktop privacy restrictions, bounded logs, automatic restarts and private configuration.
-3. Install/start services where host privileges and tunnel credentials permit. Supply equivalent systemd instructions if deployment host differs.
+2. Prepare production build and Windows services for frontend/backend/tunnel and sleep prevention; use an installation location outside Desktop privacy restrictions, bounded logs, automatic restarts and private configuration.
+3. Install/start services where host privileges and tunnel credentials permit. Target confirmed by the user: a separate Windows 11 home server.
 4. Verify health, authenticated API through proxy, process restart and daemon configuration. Document backup/restore, updates, recovery, credential bootstrap and machine/power/FileVault limitations. Commit.
 
 ## Completion checks
@@ -42,8 +42,13 @@ Run backend suite, database isolation tests, frontend typecheck/build and depend
 
 ## Progress
 
-- Repository and all three primary design screens inspected; current host is macOS ARM64.
+- Repository and all three primary design screens inspected; development host is macOS ARM64; production is Windows 11.
 - Existing user modification to .gitignore will be preserved.
 
 - Checkpoints 1–2 implemented: additive Neon migration applied; real isolated PostgreSQL tests pass (27 tests covering accounts, legacy API contracts, all five stored modes, authorization and artifact bytes). PostgreSQL test schemas use direct connections because the transaction pooler rejects search_path startup options.
 - Dependency review identified vulnerable legacy framework/PDF versions; upgraded Python dependencies and Next.js/React, removing the unused shadcn CLI dependency. Frontend audit now reports zero vulnerabilities.
+
+- Checkpoint 3 complete: production frontend build and real Chromium workflow passed, including login, actual PDF extraction, Excel download, history after reload, invitation signup and mobile overflow/member permissions.
+- Added 8 MiB chunk uploads and independent background jobs to support 200 MiB documents through Cloudflare without relying on SSE. Three focused tests cover chunk integrity, team boundaries, idempotent starts and completion after logout.
+- Full backend suite before the chunked addition: 215 passed, 1 skipped.
+- User confirmed production host is Windows 11, with timesheet.theosantoro.dev and api.theosantoro.dev. Awaiting remote access and existing Cloudflare configuration paths.

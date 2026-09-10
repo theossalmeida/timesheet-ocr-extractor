@@ -1,37 +1,19 @@
-/** @type {import('next').NextConfig} */
-const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
-
-// Comma-separated list of extra origins allowed to hit the dev server
-// (e.g. your tunnel's public URL, without protocol: "abc123.trycloudflare.com").
-const allowedDevOrigins = process.env.ALLOWED_DEV_ORIGINS
-  ? process.env.ALLOWED_DEV_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
-  : undefined;
+const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
 
 const nextConfig = {
-  allowedDevOrigins,
+  output: "standalone",
+  poweredByHeader: false,
   async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/:path*`,
-      },
-      {
-        source: "/health",
-        destination: `${backendUrl}/health`,
-      },
-      {
-        source: "/extract/:path*",
-        destination: `${backendUrl}/extract/:path*`,
-      },
-      {
-        source: "/contracheque/:path*",
-        destination: `${backendUrl}/contracheque/:path*`,
-      },
-      {
-        source: "/preview",
-        destination: `${backendUrl}/preview`,
-      },
-    ];
+    return [{ source: "/api/:path*", destination: `${backendUrl}/:path*` }];
+  },
+  async headers() {
+    return [{ source: "/:path*", headers: [
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "X-Frame-Options", value: "DENY" },
+      { key: "Referrer-Policy", value: "no-referrer" },
+      { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+      { key: "Content-Security-Policy", value: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" },
+    ] }];
   },
 };
 

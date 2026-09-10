@@ -24,8 +24,9 @@ MINIMAL_PDF = (
 
 
 @pytest.fixture(autouse=True)
-def reset_rate_limiter():
+def reset_rate_limiter(owner, monkeypatch):
     """Reset in-memory rate limit storage between tests to prevent cross-test pollution."""
+    monkeypatch.setattr("tests.test_integration.TestClient", lambda app: owner)
     try:
         limiter._limiter.storage.reset()
     except AttributeError:

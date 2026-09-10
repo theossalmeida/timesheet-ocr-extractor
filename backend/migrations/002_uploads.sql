@@ -1,0 +1,3 @@
+CREATE TABLE uploads (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), user_id uuid NOT NULL REFERENCES users(id), filename text NOT NULL, mode text NOT NULL CHECK(mode IN ('cartao','guia','contracheque','horas_extras','frequencia')), size_bytes integer NOT NULL CHECK(size_bytes>0 AND size_bytes<=209715200), extraction_id uuid REFERENCES extractions(id), created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL DEFAULT now()+interval '1 day');
+CREATE INDEX uploads_expiry ON uploads(expires_at);
+CREATE TABLE upload_parts (upload_id uuid NOT NULL REFERENCES uploads(id) ON DELETE CASCADE, part integer NOT NULL CHECK(part>=0 AND part<25), content bytea NOT NULL CHECK(octet_length(content)<=8388608), PRIMARY KEY(upload_id,part));

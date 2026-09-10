@@ -4,7 +4,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from config import settings
-from security import COOKIE_NAME, authenticate
+from security import COOKIE_NAME, authenticate, team
 
 
 class AccessMiddleware:
@@ -25,9 +25,18 @@ class AccessMiddleware:
             if not current:
                 return await JSONResponse({'error':'Entre na sua conta para continuar.'}, 401)(scope, receive, send)
             scope.setdefault('state', {})['user'] = current
+        if request.url.path.startswith(('/extract','/contracheque','/preview','/uploads')) and request.method != 'OPTIONS':
+            try:
+                await asyncio.to_thread(team, request)
+            except Exception as error:
+                from fastapi import HTTPException
+                if isinstance(error, HTTPException):
+                    return await JSONResponse({'error':error.detail}, error.status_code)(scope, receive, send)
+                raise
         size = 0
         limit = 201 * 1024 * 1024 if request.url.path.startswith(('/extract', '/contracheque', '/preview')) else 16384
-        started = False
+        if request.method == 'PUT' and request.url.path.startswith('/uploads/'):
+            limit = 8 * 1024 * 1024
 
         async def bounded_receive():
             nonlocal size
@@ -39,9 +48,7 @@ class AccessMiddleware:
             return message
 
         async def secured_send(message):
-            nonlocal started
             if message['type'] == 'http.response.start':
-                started = True
                 message['headers'] += [(b'cache-control', b'no-store'), (b'x-content-type-options', b'nosniff'), (b'referrer-policy', b'no-referrer')]
             await send(message)
 
