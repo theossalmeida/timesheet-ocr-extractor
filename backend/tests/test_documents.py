@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+import documents
 import storage
 from database import pool
 from main import app
@@ -144,3 +145,31 @@ def test_failed_runs_are_excluded_from_history_and_the_monthly_summary(owner):
     assert history['documents'] == []
     assert owner.get('/documents').json()['summary']['documents'] == before['documents']
     assert owner.get('/documents').json()['summary']['unknown_costs'] == before['unknown_costs']
+
+
+def test_missing_quote_falls_back_to_the_last_rate_charged(owner, monkeypatch):
+    app.state.limiter._limiter.storage.reset()
+    monkeypatch.setattr('services.fx.usd_brl',lambda: 5.0)
+
+    async def stream(*args):
+        yield _done_event([_call()])
+
+    with patch('main.stream_timesheet_extraction',stream):
+        owner.post('/extract/stream',files={'file':('cotacao.pdf',b'%PDF cotacao','application/pdf')})
+
+    # Quote service down: the rate already charged on a real document stands in.
+    monkeypatch.setattr('services.fx.usd_brl',lambda: None)
+    assert documents.conversion_rate() == 5.0
+
+
+def test_local_only_document_costs_zero_even_for_an_ai_named_provider(owner):
+    app.state.limiter._limiter.storage.reset()
+
+    async def stream(*args):
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKlocal').decode(),'excel_filename':'r.xlsx','provider':'gemini','rows_extracted':1,'ai_usage':[]})+'\n\n'
+
+    with patch('main.stream_timesheet_extraction',stream):
+        owner.post('/extract/stream',files={'file':('sem-chamada.pdf',b'%PDF local','application/pdf')})
+
+    document = owner.get('/documents',params={'q':'sem-chamada.pdf'}).json()['documents'][0]
+    assert float(document['cost_brl']) == 0

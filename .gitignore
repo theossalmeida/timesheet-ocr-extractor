@@ -10,6 +10,12 @@ tasks/
 backend/.env
 frontend/.env.local
 
+# secreties for ai
+secreties.txt
+
+# v2 project
+project-rebrand-and-modernization/
+
 # Python
 __pycache__/
 *.py[cod]

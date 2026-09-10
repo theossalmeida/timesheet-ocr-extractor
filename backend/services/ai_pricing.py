@@ -73,14 +73,15 @@ def usd_cost(call: dict) -> tuple[float, float] | None:
     return round(float(input_usd), 8), round(float(output_usd), 8)
 
 
-def price_calls(calls: list[dict]) -> list[dict]:
+def price_calls(calls: list[dict], rate: float | None = None) -> list[dict]:
     """Copy of `calls` with input_usd/output_usd/cost_usd/rate/cost_brl filled.
 
-    Any of those stays None when the call could not be priced (unknown model,
-    missing usage metadata) or when no USD/BRL rate is available, so callers
-    can tell "free" apart from "unknown".
+    `rate` is the USD/BRL quote to use; omitted, today's is fetched. Costs stay
+    None only when the call itself cannot be priced - an unmapped model or a
+    response with no usage metadata - so callers can tell "free" from "unknown".
     """
-    rate = fx.usd_brl() if calls else None
+    if rate is None:
+        rate = fx.usd_brl() if calls else None
     priced = []
     for call in calls:
         costs = usd_cost(call)

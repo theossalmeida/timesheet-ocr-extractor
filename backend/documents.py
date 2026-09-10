@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from database import pool
+from services import fx
 from services.ai_pricing import price_calls
 import storage
 from security import team, user
@@ -36,33 +37,50 @@ def create_extraction(request, filename, mode, content):
     return extraction_id
 
 
-AI_PROVIDERS = ('gemini','mistral','unknown')
 # Failed and interrupted runs stay in the database - the original PDF and the
 # error are kept for support - but they are not history: the team only sees
 # documents that produced files, or are still producing them.
 VISIBLE_STATUSES = ('processing','done')
 
 
+def conversion_rate():
+    """Today's USD/BRL quote, else the last rate we actually charged at.
+
+    Falling back to a rate already used on a real document keeps costs in reais
+    available when the quote service is down, without inventing a number.
+    """
+    rate = fx.usd_brl()
+    if rate:
+        return rate
+    with pool.connection() as conn:
+        row = conn.execute('SELECT usd_brl_rate FROM ai_usage WHERE usd_brl_rate IS NOT NULL ORDER BY created_at DESC LIMIT 1').fetchone()
+    return float(row['usd_brl_rate']) if row else None
+
+
 def store_ai_usage(conn, extraction_id, provider, priced):
     """Persist one row per paid AI call and return what the document cost in BRL.
 
-    None means unknown - a call we could not price (unmapped model, response
-    without usage metadata) or no USD/BRL rate - because a partial sum would
-    understate the bill; the history panel shows unknown costs explicitly.
-    Documents processed without any paid call cost 0.
+    A document that made no paid call costs 0 - pdfplumber, Tesseract and the
+    local model are free. Otherwise it costs the sum of its calls. None is
+    reserved for the anomaly of a call we could not price at all (a model
+    litellm has no price for), where a partial sum would understate the bill.
     """
     for call in priced:
         conn.execute("INSERT INTO ai_usage(id,extraction_id,provider,model,kind,metered,prompt_tokens,cached_tokens,output_tokens,thought_tokens,total_tokens,input_usd,output_usd,cost_usd,usd_brl_rate,cost_brl) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (uuid4(),extraction_id,call['provider'],call['model'],call['kind'],call['metered'],call['prompt_tokens'],call['cached_tokens'],call['output_tokens'],call['thought_tokens'],call['total_tokens'],call['input_usd'],call['output_usd'],call['cost_usd'],call['usd_brl_rate'],call['cost_brl']))
-    if priced:
-        return None if any(call['cost_brl'] is None for call in priced) else round(sum(call['cost_brl'] for call in priced),6)
-    return None if any(name in provider.lower() for name in AI_PROVIDERS) else 0
+    if not priced:
+        return 0
+    if any(call['cost_brl'] is None for call in priced):
+        logger.error('Unpriced AI call on extraction %s (provider=%s); cost reported as unknown',extraction_id,provider)
+        return None
+    return round(sum(call['cost_brl'] for call in priced),6)
 
 
 def finish_extraction(extraction_id, event):
     artifacts = []
     # Priced before opening the connection: it may import litellm and fetch the
     # day's exchange rate, neither of which belongs inside a transaction.
-    priced = price_calls(event.get('ai_usage') or [])
+    calls = event.get('ai_usage') or []
+    priced = price_calls(calls,conversion_rate()) if calls else []
     with pool.connection() as conn:
         selected = conn.execute('SELECT team_id FROM extractions WHERE id=%s',(extraction_id,)).fetchone()
         for kind in ('excel','csv'):
