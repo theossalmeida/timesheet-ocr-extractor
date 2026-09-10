@@ -68,7 +68,9 @@ def usd_cost(call: dict) -> tuple[float, float] | None:
             usage_object=usage,
         )
     except Exception as e:
-        logger.warning("No price available for %s: %s", model, e)
+        # Names the exception class: an unmapped model and a litellm that will
+        # not import look identical otherwise, and only one is a broken deploy.
+        logger.error("No price available for %s: %s: %s", model, type(e).__name__, e)
         return None
     return round(float(input_usd), 8), round(float(output_usd), 8)
 
