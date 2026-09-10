@@ -45,6 +45,7 @@ class ExtractionResult(BaseModel):
         "tesseract-guia+gemini-guia",
         "tesseract-guia+local-vision-guia",
         "gemini-guia+local-vision-guia",
+        "local-vision-guia+gemini-guia",
         "tesseract-guia+gemini-guia+local-vision-guia",
         "tesseract-guia+local-vision",
     ]
