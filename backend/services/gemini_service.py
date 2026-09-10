@@ -45,7 +45,7 @@ Rules:
 - For a normal cartao de ponto table, output one row per visible work date. Keep the punch times visible on that same row/date, in reading order.
 - For a single-service form such as PAPELETA DE SERVICOS, GUIA MINISTERIAL, ordem de servico, viagem/linha service sheet, or similar, output at most ONE row for the page. Use the visible DATA field as data and the visible INICIO/TRABALHO and TERMINO/TRABALHO fields as marcacoes.
 - Work-start labels may appear as INICIO/TRABALHO, INICIO, ENTRADA, HORA INICIO, PEGADA, or SAIDA GARAGEM.
-- Work-end labels may appear as TERMINO/TRABALHO, TERMINO, SAIDA, HORA TERMINO, LARGADA, or CHEGADA GARAGEM.
+- Work-end labels may appear as TERMINO/TRABALHO, TERMINO, SAIDA, HORA TERMINO, LARGADA, CHEGADA GARAGEM or CONTAS.
 - Ignore dates/times from signatures, electronic validation text, printed protocol text, QR codes, page numbers, addresses, phone numbers, totals, intervals, and footer/header metadata.
 - Do not infer sequential dates. Do not duplicate a single-service page into multiple days.
 - If the relevant date or work times are not readable, return {"rows":[]}.
