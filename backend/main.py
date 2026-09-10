@@ -42,6 +42,7 @@ from services.local_vision_ocr_service import (
     extract_timesheet_rows_local_vision,
     is_local_vision_ocr_configured,
 )
+from services import ai_usage
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from services.tesseract_ocr_service import (
@@ -202,7 +203,20 @@ async def _run_local_vision_timesheet(pdf_bytes: bytes | None) -> list:
         logger.warning("Local vision OCR raised unexpected error: %s", e)
         return []
 
-async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
+async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str, list[dict]]:
+    """Run the extraction pipeline, metering the paid AI calls it makes.
+
+    Returns (result, provider, ai_calls), where ai_calls is one entry per
+    Gemini HTTP call - chunk calls, single-page retries and calls whose answer
+    was discarded included, since Google bills all of them. The ledger is what
+    the document cost is computed from (documents.finish_extraction).
+    """
+    with ai_usage.recording() as ai_calls:
+        result, provider = await _extract_rows(pdf_bytes)
+    return result, provider, ai_calls
+
+
+async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     """Run extraction pipeline: pdfplumber -> Tesseract -> Gemini/local vision OCR. Returns (result, provider).
 
     Tesseract runs locally over rendered page images for anything pdfplumber
@@ -290,7 +304,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
 
 
 
-def _timesheet_bundle_content(result: ExtractionResult, provider: str, original_stem: str) -> dict:
+def _timesheet_bundle_content(result: ExtractionResult, provider: str, original_stem: str, ai_calls: list[dict] | None = None) -> dict:
     excel_bytes = build_excel(result)
     csv_content = build_csv(result)
     return {
@@ -302,6 +316,9 @@ def _timesheet_bundle_content(result: ExtractionResult, provider: str, original_
         "rows_extracted": result.total_rows,
         "provider": provider,
         "pdf_type": result.pdf_type,
+        # Consumed by documents.finish_extraction and stripped before the
+        # payload reaches the client.
+        "ai_usage": list(ai_calls or []),
     }
 
 
@@ -332,7 +349,7 @@ async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
             yield ": keep-alive\n\n"
 
     try:
-        result, provider = task.result()
+        result, provider, ai_calls = task.result()
     except HTTPException as e:
         yield "data: " + json.dumps({
             "type": "error",
@@ -357,7 +374,7 @@ async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
         "message": "Gerando arquivos...",
     }, ensure_ascii=False) + "\n\n"
 
-    content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem)
+    content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem, ai_calls)
     content["type"] = "done"
     yield "data: " + json.dumps(content, ensure_ascii=False) + "\n\n"
 
@@ -382,17 +399,18 @@ async def extract(request: Request, file: UploadFile = File(...)):
     extraction_id = await asyncio.to_thread(create_extraction, request, file.filename, "cartao", pdf_bytes)
     try:
         async with processing_lock:
-            result, provider = await _run_pipeline(pdf_bytes)
+            result, provider, ai_calls = await _run_pipeline(pdf_bytes)
     except BaseException:
         await asyncio.shield(asyncio.to_thread(fail_extraction, extraction_id))
         raise
     original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
     try:
-        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem)
+        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem, ai_calls)
         await asyncio.to_thread(finish_extraction, extraction_id, content)
     except Exception:
         await asyncio.to_thread(fail_extraction, extraction_id)
         raise
+    content.pop("ai_usage", None)
 
     return JSONResponse(
         content=content,
@@ -549,8 +567,8 @@ async def preview(request: Request, file: UploadFile = File(...)):
     extraction_id = await asyncio.to_thread(create_extraction, request, file.filename, "preview", pdf_bytes)
     try:
         async with processing_lock:
-            result, provider = await _run_pipeline(pdf_bytes)
-        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, "preview")
+            result, provider, ai_calls = await _run_pipeline(pdf_bytes)
+        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, "preview", ai_calls)
         await asyncio.to_thread(finish_extraction, extraction_id, content)
         return result
     except BaseException:

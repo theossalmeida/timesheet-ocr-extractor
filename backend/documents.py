@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from database import pool
+from services.ai_pricing import price_calls
 import storage
 from security import team, user
 
@@ -34,8 +35,29 @@ def create_extraction(request, filename, mode, content):
     return extraction_id
 
 
+AI_PROVIDERS = ('gemini','mistral','unknown')
+
+
+def store_ai_usage(conn, extraction_id, provider, priced):
+    """Persist one row per paid AI call and return what the document cost in BRL.
+
+    None means unknown - a call we could not price (unmapped model, response
+    without usage metadata) or no USD/BRL rate - because a partial sum would
+    understate the bill; the history panel shows unknown costs explicitly.
+    Documents processed without any paid call cost 0.
+    """
+    for call in priced:
+        conn.execute("INSERT INTO ai_usage(id,extraction_id,provider,model,kind,metered,prompt_tokens,cached_tokens,output_tokens,thought_tokens,total_tokens,input_usd,output_usd,cost_usd,usd_brl_rate,cost_brl) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (uuid4(),extraction_id,call['provider'],call['model'],call['kind'],call['metered'],call['prompt_tokens'],call['cached_tokens'],call['output_tokens'],call['thought_tokens'],call['total_tokens'],call['input_usd'],call['output_usd'],call['cost_usd'],call['usd_brl_rate'],call['cost_brl']))
+    if priced:
+        return None if any(call['cost_brl'] is None for call in priced) else round(sum(call['cost_brl'] for call in priced),6)
+    return None if any(name in provider.lower() for name in AI_PROVIDERS) else 0
+
+
 def finish_extraction(extraction_id, event):
     artifacts = []
+    # Priced before opening the connection: it may import litellm and fetch the
+    # day's exchange rate, neither of which belongs inside a transaction.
+    priced = price_calls(event.get('ai_usage') or [])
     with pool.connection() as conn:
         selected = conn.execute('SELECT team_id FROM extractions WHERE id=%s',(extraction_id,)).fetchone()
         for kind in ('excel','csv'):
@@ -51,7 +73,7 @@ def finish_extraction(extraction_id, event):
         if not artifacts:
             raise ValueError('No generated artifacts')
         provider = event.get('provider','unknown')
-        cost = None if any(name in provider.lower() for name in ('gemini','mistral','unknown')) else 0
+        cost = store_ai_usage(conn,extraction_id,provider,priced)
         conn.execute("UPDATE extractions SET status='done', provider=%s,row_count=%s,cost_brl=%s,completed_at=now() WHERE id=%s", (provider,event.get('rows_extracted',event.get('months_extracted',0)),cost,extraction_id))
     return artifacts
 
@@ -77,6 +99,7 @@ async def stored_stream(request, pdf_bytes, filename, mode, factory):
                     if event.get('type') == 'done':
                         artifacts = await asyncio.to_thread(finish_extraction,extraction_id,event)
                         completed = True
+                        event.pop('ai_usage', None)
                         event['extraction_id'] = str(extraction_id)
                         event['artifacts'] = artifacts
                         if request.headers.get('x-autus-artifacts') == '1':

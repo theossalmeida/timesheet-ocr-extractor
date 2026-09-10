@@ -78,7 +78,7 @@ def test_extract_success_returns_bundle():
 
 
 def test_extract_stream_success_returns_sse_bundle():
-    with patch("main._run_pipeline", new=AsyncMock(return_value=(SAMPLE_RESULT, "pdfplumber"))), \
+    with patch("main._run_pipeline", new=AsyncMock(return_value=(SAMPLE_RESULT, "pdfplumber", []))), \
          patch("main.build_excel", return_value=b"PKfake_excel_bytes"):
         data = io.BytesIO(MINIMAL_PDF)
         r = client.post("/extract/stream", files={"file": ("test.pdf", data, "application/pdf")})

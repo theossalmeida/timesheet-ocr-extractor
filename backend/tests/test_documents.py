@@ -1,10 +1,12 @@
 import base64
 import json
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 
+from database import pool
 from main import app
 
 
@@ -52,3 +54,57 @@ def test_failed_generation_retains_original(owner):
     row = owner.get('/documents',params={'q':'broken.pdf'}).json()['documents'][0]
     assert row['status'] == 'interrupted'
     assert [a['kind'] for a in row['artifacts']] == ['original']
+
+
+def _done_event(ai_usage):
+    return 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKspreadsheet').decode(),'excel_filename':'result.xlsx','provider':'gemini','rows_extracted':4,'ai_usage':ai_usage})+'\n\n'
+
+
+def _call(**overrides):
+    return {'provider':'gemini','model':'gemini-3.1-pro-preview','kind':'extract','metered':True,'prompt_tokens':1000,'cached_tokens':0,'output_tokens':500,'thought_tokens':100,'total_tokens':1600,**overrides}
+
+
+def test_gemini_document_costs_the_sum_of_its_calls(owner, monkeypatch):
+    app.state.limiter._limiter.storage.reset()
+    monkeypatch.setattr('services.fx.usd_brl',lambda: 5.0)
+
+    async def stream(*args):
+        yield _done_event([_call(),_call(kind='normalize',prompt_tokens=2000,output_tokens=0,thought_tokens=0,total_tokens=2000)])
+
+    with patch('main.stream_timesheet_extraction',stream):
+        response = owner.post('/extract/stream',files={'file':('metered.pdf',b'%PDF metered','application/pdf')})
+    event = json.loads(response.text.split('data: ')[-1])
+    assert 'ai_usage' not in event
+
+    with pool.connection() as conn:
+        rows = conn.execute('SELECT * FROM ai_usage WHERE extraction_id=%s ORDER BY prompt_tokens',(UUID(event['extraction_id']),)).fetchall()
+    assert [row['kind'] for row in rows] == ['extract','normalize']
+    assert [row['prompt_tokens'] for row in rows] == [1000,2000]
+    assert [row['output_tokens'] for row in rows] == [500,0]
+    # 1000 input + 500 output tokens at $2/$12 per 1M, then 2000 input tokens.
+    assert float(rows[0]['cost_usd']) == pytest.approx(0.008)
+    assert float(rows[1]['cost_usd']) == pytest.approx(0.004)
+    assert [float(row['usd_brl_rate']) for row in rows] == [5.0,5.0]
+
+    document = owner.get('/documents',params={'q':'metered.pdf'}).json()['documents'][0]
+    assert float(document['cost_brl']) == pytest.approx(0.012*5.0)
+
+
+def test_unpriceable_call_leaves_the_cost_unknown(owner, monkeypatch):
+    app.state.limiter._limiter.storage.reset()
+    monkeypatch.setattr('services.fx.usd_brl',lambda: 5.0)
+
+    async def stream(*args):
+        yield _done_event([_call(),_call(metered=False,prompt_tokens=0,output_tokens=0,thought_tokens=0,total_tokens=0)])
+
+    with patch('main.stream_timesheet_extraction',stream):
+        response = owner.post('/extract/stream',files={'file':('unmetered.pdf',b'%PDF unmetered','application/pdf')})
+    event = json.loads(response.text.split('data: ')[-1])
+
+    with pool.connection() as conn:
+        rows = conn.execute('SELECT metered,cost_usd FROM ai_usage WHERE extraction_id=%s ORDER BY metered',(UUID(event['extraction_id']),)).fetchall()
+    assert [row['metered'] for row in rows] == [False,True]
+    assert rows[0]['cost_usd'] is None
+
+    document = owner.get('/documents',params={'q':'unmetered.pdf'}).json()['documents'][0]
+    assert document['cost_brl'] is None

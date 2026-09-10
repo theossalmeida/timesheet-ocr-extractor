@@ -3,10 +3,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # No longer used by the active extraction pipeline - OCR now runs locally
-    # via Tesseract (services/tesseract_ocr_service.py). Kept as a required
-    # field only because services/gemini_service.py (unused/dead code) still
-    # references it; services/mistral_service.py (also unused) depends on it too.
     DATABASE_URL: str = ""
     R2_ENDPOINT_URL: str = ""
     R2_ACCESS_KEY_ID: str = ""
@@ -17,9 +13,17 @@ class Settings(BaseSettings):
     APP_ORIGIN: str = "http://localhost:3000"
     COOKIE_SECURE: bool = True
     SESSION_HOURS: int = 24
+    # Paid OCR fallback, reached only for scanned pages that pdfplumber and
+    # Tesseract could not read. Every call is metered and priced per token
+    # (services/ai_usage.py, services/ai_pricing.py), so the model name must
+    # match one litellm knows a price for.
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     MISTRAL_API_KEY: str = ""
+    # Fallback USD/BRL rate used to price AI usage when the daily quote cannot
+    # be fetched (services/fx.py). 0 means "no fallback": costs are then
+    # recorded in USD only and reported as unknown in reais.
+    USD_BRL_RATE: float = 0.0
     # Optional explicit path to the Tesseract binary (e.g.
     # "C:\Program Files\Tesseract-OCR\tesseract.exe"). Only needed when the
     # binary is installed but NOT on the system PATH - common on Windows dev

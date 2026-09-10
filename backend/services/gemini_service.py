@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 from config import settings
 from models.timesheet import TimesheetRow
+from services import ai_usage
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia
 
 GEMINI_PAGE_CHUNK_SIZE = 2
@@ -25,9 +26,12 @@ def is_gemini_configured() -> bool:
     return bool((settings.GEMINI_API_KEY or "").strip())
 
 
+def _gemini_model() -> str:
+    return (settings.GEMINI_MODEL or "gemini-3.1-pro-preview").strip()
+
+
 def _gemini_url() -> str:
-    model = (settings.GEMINI_MODEL or "gemini-3.1-pro-preview").strip()
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model()}:generateContent"
 
 
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
@@ -168,7 +172,14 @@ def _rows_from_payload(payload: Any) -> list[TimesheetRow]:
     return rows
 
 
-def _parse_gemini_response(response_json: dict) -> list[TimesheetRow]:
+def _parse_gemini_response(response_json: dict, kind: str) -> list[TimesheetRow]:
+    """Meter the call, then parse it.
+
+    Metering comes first: Google bills a completed call whether or not its
+    answer turns out to be parseable, so a discarded response still has to
+    reach the cost ledger.
+    """
+    ai_usage.record("gemini", _gemini_model(), kind, ai_usage.usage_from_gemini(response_json))
     payload = _loads_gemini_json(_extract_response_text(response_json))
     return _rows_from_payload(payload)
 
@@ -230,7 +241,7 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
         raise GeminiExtractionError(
             f"Gemini API error {response.status_code}: {response.text[:300]}"
         )
-    return _parse_gemini_response(response.json())
+    return _parse_gemini_response(response.json(), "extract")
 
 
 def _split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int) -> list[bytes]:
@@ -315,4 +326,4 @@ async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
         raise GeminiExtractionError(
             f"Gemini normalization error {response.status_code}: {response.text[:300]}"
         )
-    return _parse_gemini_response(response.json())
+    return _parse_gemini_response(response.json(), "normalize")

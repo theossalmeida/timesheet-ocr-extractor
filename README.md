@@ -8,6 +8,7 @@ Production: https://timesheet.theosantoro.dev
 - FastAPI extraction using native PDF parsing, Tesseract, and configured AI fallbacks.
 - Email/password authentication, revocable sessions, team membership and email-bound invitation links.
 - Neon PostgreSQL for metadata; private Cloudflare R2 for originals and generated files.
+- Per-call metering of paid AI usage: tokens are priced from litellm's model price map and converted to BRL for the team's monthly total.
 - Chunked uploads and background processing; team history and authenticated downloads.
 - Windows services for frontend, backend and the existing Cloudflare tunnel.
 
