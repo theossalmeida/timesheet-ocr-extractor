@@ -1,166 +1,18 @@
-# Timesheet Extractor
+# AUTUS
 
-Extracts Brazilian labor PDFs and generates Excel/CSV files ready for use.
+Private team workspace for extracting Brazilian labor documents into Excel and PJeCalc CSV/ZIP files. Supports timecards, ministerial guides, Petrobras paychecks, extra hours and frequency cycles.
 
-Supported modes:
+Production: https://timesheet.theosantoro.dev
 
-- **Cartao de Ponto** - standard timecard PDFs, native or scanned
-- **Guia Ministerial** - external service logs, such as drivers' ministerial guides
-- **Contracheque** - Petrobras paycheck PDFs into yearly salary sheets
-- **Horas Extras** - Petrobras paycheck PDFs into a month-by-month Excel with one dynamic column per extra-hour item
-- **Frequencia** - Petrobras frequency reports into daily embarked/off-cycle classifications
+- Next.js 16 / React 19 frontend following the supplied AUTUS design.
+- FastAPI extraction using native PDF parsing, Tesseract, and configured AI fallbacks.
+- Email/password authentication, revocable sessions, team membership and email-bound invitation links.
+- Neon PostgreSQL for metadata; private Cloudflare R2 for originals and generated files.
+- Chunked uploads and background processing; team history and authenticated downloads.
+- Windows services for frontend, backend and the existing Cloudflare tunnel.
 
-## How It Works
+See [Windows installation and operations](deploy/README.md) for installation, first login, backups, recovery and verification. The implementation record is in [the v2 plan](docs/V2-PLAN.md).
 
-```text
-PDF -> pdfplumber -> Gemini 3 Flash when native extraction fails
-                         |
-                         v
-                 Styled Excel / PJeCalc CSV
-```
+For development, configure `backend/.env` using [the example](backend/.env.example), setting `APP_ORIGIN=http://localhost:3000` and `COOKIE_SECURE=false` only for local HTTP. Install `backend/requirements-dev.txt`, run `uvicorn main:app --host 127.0.0.1 --port 8000` from backend, then `npm ci` and `npm run dev` from frontend. The frontend uses its same-origin `/api` proxy; no public backend URL is embedded in the browser bundle.
 
-The backend first attempts native extraction with `pdfplumber`. If a page cannot be parsed, the paycheck and extra-hours flows send only the failed pages to Gemini. Ministerial guides are processed by Gemini in chunks, with real-time progress streamed through SSE.
-
-## Stack
-
-| Layer | Technology |
-|---|---|
-| Backend | FastAPI + Python 3.12 |
-| Extraction | pdfplumber, Google Gemini 3 Flash |
-| Excel | openpyxl |
-| Frontend | Next.js 14 + TypeScript + Tailwind |
-| Deploy | Fly.io, region `gru` |
-
-## Running Locally
-
-### Backend
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-cp .env.example .env  # fill in your keys
-uvicorn main:app --reload --port 8000
-```
-
-Required `.env`:
-
-```env
-GEMINI_API_KEY=...
-CORS_ORIGINS=["http://localhost:3000"]
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-
-echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-## Accessing from Another Computer (Tunnels)
-
-To reach both servers from another machine, run one tunnel per service (example uses [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), no account needed):
-
-```bash
-# 1. Backend running on :8000, then in a new terminal:
-cloudflared tunnel --url http://localhost:8000
-# -> copy the printed https://<backend-id>.trycloudflare.com URL
-```
-
-```bash
-# 2. Point the frontend at that backend URL, then start it:
-cd frontend
-echo "NEXT_PUBLIC_API_URL=https://<backend-id>.trycloudflare.com" > .env.local
-npm run dev
-```
-
-```bash
-# 3. Frontend running on :3000, then in a new terminal:
-cloudflared tunnel --url http://localhost:3000
-# -> share the printed https://<frontend-id>.trycloudflare.com URL
-```
-
-```env
-# backend/.env — allow the frontend tunnel to call the API
-CORS_ORIGINS=["https://<frontend-id>.trycloudflare.com"]
-```
-
-If the frontend tunnel keeps changing on every run, either set `CORS_ORIGINS=["*"]` (fine here, the API uses no cookies/credentials) or add `ALLOWED_DEV_ORIGINS=<frontend-id>.trycloudflare.com` to `frontend/.env.local` to silence Next.js's dev-server cross-origin warning for `/_next/*` assets.
-
-`NEXT_PUBLIC_API_URL` is baked in when the frontend dev server compiles, so restart `npm run dev` after changing it.
-
-## Endpoints
-
-| Method | Route | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `POST` | `/extract` | Extract timecard to JSON with Excel + CSV as base64 |
-| `POST` | `/extract/guia` | Extract ministerial guide to an SSE stream with progress and final result |
-| `POST` | `/extract/frequencia` | Classify Petrobras frequency report days into cycle situations |
-| `POST` | `/contracheque` | Extract Petrobras paychecks to a salary Excel through SSE |
-| `POST` | `/contracheque/horas-extras` | Extract only extra-hour paycheck items to a dynamic Excel through SSE |
-| `POST` | `/preview` | Extract without generating files, for debugging |
-
-Rate limit: 10 req/min per IP.
-
-## Deploy
-
-Two Fly.io apps under the Personal org, Sao Paulo region:
-
-```text
-timesheet-api                  -> backend  (1 GB RAM)
-timesheet-app-damp-forest-8112 -> frontend (512 MB RAM)
-```
-
-Both suspend automatically when idle (`min_machines_running = 0`).
-
-### Backend
-
-```bash
-cd backend
-fly secrets set \
-  GEMINI_API_KEY="..." \
-  CORS_ORIGINS='["https://timesheet-app-damp-forest-8112.fly.dev"]'
-fly deploy
-```
-
-### Frontend
-
-`NEXT_PUBLIC_API_URL` is already set as a build arg in `fly.toml`, so no additional secrets are needed.
-
-```bash
-cd frontend
-fly deploy
-```
-
-## Supported PDF Formats
-
-- Native table with entry/exit columns
-- Multirow with merged cells, such as `DD/mmm/YY`
-- Fixed-width text in `FOLHA DE PONTO` format
-- Petrobras paycheck PDFs
-- Petrobras frequency reports with `FOLG` / `HS02` daily rows
-- Scanned PDFs through Gemini 3 Flash OCR
-- Hybrid PDFs mixing native and scanned pages
-
-## Output
-
-**Cartao de Ponto Excel** - two sheets:
-
-- *Timesheet Records*: rows with date, entry/exit times, and occurrence type
-- *Summary*: total records, date range, and occurrence type counts
-
-**PJeCalc CSV** - `;` delimited, UTF-8 BOM, with every calendar day filled in.
-
-**Contracheque Excel** - salary sheets organized by year and month.
-
-**Horas Extras Excel** - one row per month, one dynamic column per extra-hour item, and a final total column.
-
-**Frequencia Excel** - one row per day with cycle day, calculated situation, scale, PDF markers, and a summary sheet.
+The tests create and clean a separate PostgreSQL schema. Run `python -m pytest -q` from backend, and `npm run lint`, `npm run build`, and `npm audit` from frontend. Real R2 and Chromium checks are documented in the operations guide.

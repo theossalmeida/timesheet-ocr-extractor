@@ -56,3 +56,12 @@ Run backend suite, database isolation tests, frontend typecheck/build and depend
 - Storage scope changed at user request: private Cloudflare R2 bucket `autus`, raw_files and processed_files prefixes. Neon now stores object references and metadata; backward-compatible migration supports moving existing binary rows to R2. Nine real R2 integration tests passed; all test objects removed. R2 public development domain is disabled and no public custom domains exist.
 - Updated suite: 218 passed, 2 skipped (optional browser test plus one existing fixture test).
 - Windows access established through Tailscale SSH after user enabled OpenSSH. Existing app runs from C:\Projetos\Timesheet Extractor in interactive processes. Existing named tunnel configuration found; production configuration preserves its routes and OCR settings.
+
+- Production switched to Windows services (LocalService, service-specific secret ACLs), reusing the existing named Cloudflare tunnel and preserving the old project files. Public health returns v2; both hostnames reject anonymous document requests.
+- Public Chromium verification passed against the actual Windows/R2/Neon deployment: account login, PDF processing, Excel download, identical original bytes, history reload, mobile layout, no JavaScript errors. Synthetic verification document was removed afterward.
+- Initial account and team provisioned; generated password stored only in a restricted Windows first-login file.
+- Production backup command tested; Python dependency audit and npm audit report zero known vulnerabilities.
+
+- All three Windows services recovered automatically after their application process trees were terminated. Verified new service process IDs, session 0, LocalService account, automatic startup, loopback-only app listeners, and working public login/history afterward. No forced desktop logout or machine reboot was performed.
+- Old start/stop batch files now control only AUTUS services; originals are retained as .v1.bak. No legacy AUTUS scheduled startup tasks were found.
+- Implementation complete; operations guide and repeatable Windows preparation/activation scripts included.
