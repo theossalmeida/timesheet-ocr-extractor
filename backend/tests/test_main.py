@@ -11,7 +11,9 @@ from models.timesheet import ExtractionResult, TimesheetRow
 client = TestClient(app)
 
 @pytest.fixture(autouse=True)
-def reset_rate_limiter():
+def reset_rate_limiter(owner):
+    client.cookies.update(owner.cookies)
+    client.headers.update(owner.headers)
     try:
         app.state.limiter._limiter.storage.reset()
     except AttributeError:
@@ -185,7 +187,7 @@ def test_preview_invalid_pdf():
 
 def test_contracheque_extra_hours_stream_route():
     async def fake_stream(pdf_bytes: bytes, original_stem: str):
-        yield 'data: {"type":"done","months_extracted":1,"columns_extracted":1}\n\n'
+        yield 'data: {"type":"done","months_extracted":1,"columns_extracted":1,"excel_b64":"UEtmYWtl","excel_filename":"horas.xlsx"}\n\n'
 
     with patch("main.stream_contracheque_extra_hours_extraction", fake_stream):
         data = io.BytesIO(MINIMAL_PDF)
@@ -196,7 +198,7 @@ def test_contracheque_extra_hours_stream_route():
 
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
-    assert '"type":"done"' in r.text
+    assert any(json.loads(line[6:])['type'] == 'done' for line in r.text.splitlines() if line.startswith('data: '))
 
 
 def test_extract_frequencia_success_returns_excel_bundle():
@@ -212,9 +214,10 @@ def test_extract_frequencia_success_returns_excel_bundle():
 
     assert r.status_code == 200
     assert "text/event-stream" in r.headers["content-type"]
-    assert '"excel_filename":"frequencia_frequencia.xlsx"' in r.text
-    assert '"rows_extracted":1' in r.text
-    assert '"provider":"pdfplumber"' in r.text
+    event = json.loads(r.text.split('data: ')[1])
+    assert event['excel_filename'] == 'frequencia_frequencia.xlsx'
+    assert event['rows_extracted'] == 1
+    assert event['provider'] == 'pdfplumber'
 
 
 def test_extract_fallback_to_local_vision_when_tesseract_returns_no_rows():

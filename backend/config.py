@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     # via Tesseract (services/tesseract_ocr_service.py). Kept as a required
     # field only because services/gemini_service.py (unused/dead code) still
     # references it; services/mistral_service.py (also unused) depends on it too.
+    DATABASE_URL: str = ""
+    BOOTSTRAP_TOKEN: str = ""
+    APP_ORIGIN: str = "http://localhost:3000"
+    COOKIE_SECURE: bool = True
+    SESSION_HOURS: int = 24
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.1-pro-preview"
     MISTRAL_API_KEY: str = ""

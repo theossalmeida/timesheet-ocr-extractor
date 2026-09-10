@@ -44,3 +44,6 @@ Run backend suite, database isolation tests, frontend typecheck/build and depend
 
 - Repository and all three primary design screens inspected; current host is macOS ARM64.
 - Existing user modification to .gitignore will be preserved.
+
+- Checkpoints 1–2 implemented: additive Neon migration applied; real isolated PostgreSQL tests pass (27 tests covering accounts, legacy API contracts, all five stored modes, authorization and artifact bytes). PostgreSQL test schemas use direct connections because the transaction pooler rejects search_path startup options.
+- Dependency review identified vulnerable legacy framework/PDF versions; upgraded Python dependencies and Next.js/React, removing the unused shadcn CLI dependency. Frontend audit now reports zero vulnerabilities.

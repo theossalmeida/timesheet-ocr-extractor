@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE users (id uuid PRIMARY KEY, email text NOT NULL UNIQUE, name text NOT NULL, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE teams (id uuid PRIMARY KEY, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE memberships (team_id uuid NOT NULL REFERENCES teams(id), user_id uuid NOT NULL REFERENCES users(id), role text NOT NULL CHECK (role IN ('admin','member')), PRIMARY KEY(team_id,user_id));
+CREATE TABLE sessions (token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX sessions_user ON sessions(user_id);
+CREATE INDEX sessions_expiry ON sessions(expires_at);
+CREATE TABLE invitations (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), email text NOT NULL, token_hash text NOT NULL UNIQUE, created_by uuid NOT NULL REFERENCES users(id), expires_at timestamptz NOT NULL, accepted_at timestamptz, revoked_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX invitations_team ON invitations(team_id);
+CREATE TABLE extractions (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), user_id uuid NOT NULL REFERENCES users(id), filename text NOT NULL, mode text NOT NULL, status text NOT NULL CHECK (status IN ('processing','done','failed','interrupted')), provider text, row_count integer, cost_brl numeric(14,6), error text, created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz);
+CREATE INDEX extractions_history ON extractions(team_id,created_at DESC,id);
+CREATE TABLE artifacts (id uuid PRIMARY KEY, extraction_id uuid NOT NULL REFERENCES extractions(id) ON DELETE CASCADE, kind text NOT NULL CHECK (kind IN ('original','excel','csv')), filename text NOT NULL, mime_type text NOT NULL, size_bytes integer NOT NULL, content bytea NOT NULL, UNIQUE(extraction_id,kind));
+CREATE TABLE auth_attempts (key text PRIMARY KEY, attempts integer NOT NULL, window_start timestamptz NOT NULL DEFAULT now());

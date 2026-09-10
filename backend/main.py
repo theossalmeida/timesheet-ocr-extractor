@@ -3,6 +3,13 @@ import base64
 import io
 import json
 import logging
+from contextlib import asynccontextmanager
+
+from access import AccessMiddleware
+from accounts import router as accounts_router
+from database import initialize, pool
+from documents import router as documents_router, stored_stream, safe_filename, create_extraction, finish_extraction, fail_extraction, processing_lock
+from security import team
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,19 +56,32 @@ logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 
+@asynccontextmanager
+async def lifespan(app):
+    await asyncio.to_thread(initialize)
+    yield
+    await asyncio.to_thread(pool.close)
+
+
 app = FastAPI(
-    title="Timesheet Extractor",
+    lifespan=lifespan,
+    title="AUTUS",
     description="Extrai registros de ponto de PDFs trabalhistas e gera Excel.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_methods=["POST", "GET"],
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "DELETE"],
     allow_headers=["*"],
     expose_headers=["X-Provider-Used", "X-Rows-Extracted", "X-PDF-Type"],
 )
+
+app.add_middleware(AccessMiddleware)
+app.include_router(accounts_router)
+app.include_router(documents_router)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -186,7 +206,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     could not read. Gemini is used only for scanned/image-only PDF pages
     after local extraction fails.
     """
-    pdf_type = detect_pdf_type(pdf_bytes)
+    pdf_type = await asyncio.to_thread(detect_pdf_type, pdf_bytes)
     logger.info("PDF type detected: %s, size: %d bytes", pdf_type, len(pdf_bytes))
 
     provider = "pdfplumber"
@@ -195,12 +215,12 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
     # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
     # OCR is the fallback, only reached when pdfplumber yields nothing for a page.
-    rows = extract_with_pdfplumber(pdf_bytes)
+    rows = await asyncio.to_thread(extract_with_pdfplumber, pdf_bytes)
 
     if rows:
         # Check for scanned pages mixed into the same PDF (e.g. digital-signature wrappers
         # around image-only timesheets after the native-text section).
-        scanned_bytes = get_scanned_page_bytes(pdf_bytes)
+        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes)
         if scanned_bytes:
             pdf_type = "mixed"
             logger.info("Hybrid PDF: found scanned pages - running local Tesseract OCR")
@@ -223,7 +243,7 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
                         logger.info("Hybrid local-vision merge - total rows=%d", len(rows))
 
     if not rows:
-        scanned_bytes = get_scanned_page_bytes(pdf_bytes)
+        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes)
         tesseract_bytes = scanned_bytes or pdf_bytes
         rows = await asyncio.to_thread(_run_tesseract_timesheet, tesseract_bytes)
         if rows:
@@ -334,19 +354,21 @@ async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
         "message": "Gerando arquivos...",
     }, ensure_ascii=False) + "\n\n"
 
-    content = _timesheet_bundle_content(result, provider, original_stem)
+    content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem)
     content["type"] = "done"
     yield "data: " + json.dumps(content, ensure_ascii=False) + "\n\n"
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "2.0.0"}
 
 
 @app.post("/extract")
 @limiter.limit("10/minute")
 async def extract(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /extract - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -354,9 +376,20 @@ async def extract(request: Request, file: UploadFile = File(...)):
     )
     _validate_pdf(pdf_bytes, len(pdf_bytes))
 
-    result, provider = await _run_pipeline(pdf_bytes)
+    extraction_id = await asyncio.to_thread(create_extraction, request, file.filename, "cartao", pdf_bytes)
+    try:
+        async with processing_lock:
+            result, provider = await _run_pipeline(pdf_bytes)
+    except BaseException:
+        await asyncio.shield(asyncio.to_thread(fail_extraction, extraction_id))
+        raise
     original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
-    content = _timesheet_bundle_content(result, provider, original_stem)
+    try:
+        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem)
+        await asyncio.to_thread(finish_extraction, extraction_id, content)
+    except Exception:
+        await asyncio.to_thread(fail_extraction, extraction_id)
+        raise
 
     return JSONResponse(
         content=content,
@@ -371,7 +404,9 @@ async def extract(request: Request, file: UploadFile = File(...)):
 @app.post("/extract/stream")
 @limiter.limit("10/minute")
 async def extract_stream(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /extract/stream - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -381,7 +416,7 @@ async def extract_stream(request: Request, file: UploadFile = File(...)):
 
     original_stem = (file.filename or "ponto").removesuffix(".pdf").removesuffix(".PDF")
     return StreamingResponse(
-        stream_timesheet_extraction(pdf_bytes, original_stem),
+        stored_stream(request, pdf_bytes, file.filename, "cartao", lambda: stream_timesheet_extraction(pdf_bytes, original_stem)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -394,7 +429,9 @@ async def extract_stream(request: Request, file: UploadFile = File(...)):
 @app.post("/extract/guia")
 @limiter.limit("10/minute")
 async def extract_guia(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /extract/guia - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -405,7 +442,7 @@ async def extract_guia(request: Request, file: UploadFile = File(...)):
     original_stem = (file.filename or "guia").removesuffix(".pdf").removesuffix(".PDF")
 
     return StreamingResponse(
-        stream_guia_extraction(pdf_bytes, original_stem),
+        stored_stream(request, pdf_bytes, file.filename, "guia", lambda: stream_guia_extraction(pdf_bytes, original_stem)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -418,7 +455,9 @@ async def extract_guia(request: Request, file: UploadFile = File(...)):
 @app.post("/extract/frequencia")
 @limiter.limit("10/minute")
 async def extract_frequencia(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /extract/frequencia - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -429,7 +468,7 @@ async def extract_frequencia(request: Request, file: UploadFile = File(...)):
     original_stem = (file.filename or "frequencia").removesuffix(".pdf").removesuffix(".PDF")
 
     return StreamingResponse(
-        stream_frequency_cycle_extraction(pdf_bytes, original_stem),
+        stored_stream(request, pdf_bytes, file.filename, "frequencia", lambda: stream_frequency_cycle_extraction(pdf_bytes, original_stem)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -442,7 +481,9 @@ async def extract_frequencia(request: Request, file: UploadFile = File(...)):
 @app.post("/contracheque")
 @limiter.limit("10/minute")
 async def extract_contracheque(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /contracheque - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -453,7 +494,7 @@ async def extract_contracheque(request: Request, file: UploadFile = File(...)):
     original_stem = (file.filename or "contracheque").removesuffix(".pdf").removesuffix(".PDF")
 
     return StreamingResponse(
-        stream_contracheque_extraction(pdf_bytes, original_stem),
+        stored_stream(request, pdf_bytes, file.filename, "contracheque", lambda: stream_contracheque_extraction(pdf_bytes, original_stem)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -466,7 +507,9 @@ async def extract_contracheque(request: Request, file: UploadFile = File(...)):
 @app.post("/contracheque/horas-extras")
 @limiter.limit("10/minute")
 async def extract_contracheque_horas_extras(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /contracheque/horas-extras - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -477,7 +520,7 @@ async def extract_contracheque_horas_extras(request: Request, file: UploadFile =
     original_stem = (file.filename or "contracheque").removesuffix(".pdf").removesuffix(".PDF")
 
     return StreamingResponse(
-        stream_contracheque_extra_hours_extraction(pdf_bytes, original_stem),
+        stored_stream(request, pdf_bytes, file.filename, "horas_extras", lambda: stream_contracheque_extra_hours_extraction(pdf_bytes, original_stem)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -490,7 +533,9 @@ async def extract_contracheque_horas_extras(request: Request, file: UploadFile =
 @app.post("/preview")
 @limiter.limit("10/minute")
 async def preview(request: Request, file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
+    await asyncio.to_thread(team, request)
+    pdf_bytes = await file.read(200 * 1024 * 1024 + 1)
+    file.filename = safe_filename(file.filename or "documento.pdf")
     logger.info(
         "POST /preview - filename=%s size=%d bytes",
         file.filename or "unknown",
@@ -498,5 +543,13 @@ async def preview(request: Request, file: UploadFile = File(...)):
     )
     _validate_pdf(pdf_bytes, len(pdf_bytes))
 
-    result, _ = await _run_pipeline(pdf_bytes)
-    return result
+    extraction_id = await asyncio.to_thread(create_extraction, request, file.filename, "preview", pdf_bytes)
+    try:
+        async with processing_lock:
+            result, provider = await _run_pipeline(pdf_bytes)
+        content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, "preview")
+        await asyncio.to_thread(finish_extraction, extraction_id, content)
+        return result
+    except BaseException:
+        await asyncio.shield(asyncio.to_thread(fail_extraction, extraction_id))
+        raise
