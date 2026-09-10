@@ -39,7 +39,7 @@ The installer disables automatic sleep and hibernation while connected to AC pow
 
 The deployed initial account is `theoalmeida00@gmail.com`, with team `Equipe Theo`. Its generated temporary password is stored in the administrator-only `C:\ProgramData\Autus\config\first-login.txt`; change it under Equipe → Alterar senha. Do not reuse the Windows password.
 
-On a fresh installation, the first account requires the private `BOOTSTRAP_TOKEN` in `C:\ProgramData\Autus\config\backend.env`. Open the app, select “Configurar a primeira conta,” and enter it with your email, name and a password of at least 15 characters. Create a team. The code cannot create further accounts after the first user exists.
+On a fresh installation, the first account requires the private `BOOTSTRAP_TOKEN` in `C:\ProgramData\Autus\config\backend.env`. Open the app, select “Configurar a primeira conta,” and enter it with your email, name and a password of at least 8 characters. Create a team. The code cannot create further accounts after the first user exists.
 
 Team administrators create invitation links valid for seven days. Share the link privately with the invited email owner. Existing users sign in and accept it; new users register through it. Each account can create its own teams. Removing members immediately revokes their team access while retaining their documents. Administrators cannot be removed. Password changes revoke all other sessions.
 

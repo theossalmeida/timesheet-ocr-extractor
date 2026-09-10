@@ -7,9 +7,9 @@ from security import password_hasher
 
 def main():
     email = sys.argv[1].strip().lower()
-    password = getpass.getpass('New password (at least 15 characters): ')
-    if not 15<=len(password)<=128 or password!=getpass.getpass('Repeat password: '):
-        raise SystemExit('Passwords must match and contain 15–128 characters.')
+    password = getpass.getpass('New password (at least 8 characters): ')
+    if not 8<=len(password)<=128 or password!=getpass.getpass('Repeat password: '):
+        raise SystemExit('Passwords must match and contain 8–128 characters.')
     pool.open()
     try:
         with pool.connection() as conn:

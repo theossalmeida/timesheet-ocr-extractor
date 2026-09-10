@@ -56,7 +56,7 @@ def test_autus_browser_flow(owner):
             page.goto(link)
             page.get_by_label('Nome',exact=True).fill('Browser Member')
             page.get_by_label('E-mail',exact=True).fill('browser-member@example.com')
-            page.get_by_label('Senha · pelo menos 15 caracteres',exact=True).fill('browser member password')
+            page.get_by_label('Senha · pelo menos 8 caracteres',exact=True).fill('browser member password')
             page.get_by_role('button',name='Criar conta',exact=True).click()
             expect(page.get_by_role('heading',name='1 · Tipo de documento')).to_be_visible()
             page.set_viewport_size({'width':390,'height':844})

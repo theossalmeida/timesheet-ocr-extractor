@@ -19,7 +19,7 @@ class Credentials(BaseModel):
 
 class Registration(Credentials):
     name: str = Field(min_length=1, max_length=100, pattern=r"\S")
-    password: str = Field(min_length=15, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     bootstrap_token: str = Field(default="", max_length=128)
     invitation_token: str = Field(default="", max_length=128)
 
@@ -38,7 +38,7 @@ class Token(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=15, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 def create_session(conn, response: Response, user_id):
