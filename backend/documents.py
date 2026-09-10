@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import time
@@ -25,14 +26,38 @@ def safe_filename(value):
     return value.replace('\\', '/').split('/')[-1].replace('\r', '').replace('\n', '').replace('\x00', '')[:200] or 'documento.pdf'
 
 
-def create_extraction(request, filename, mode, content):
+def content_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+
+def find_duplicate(conn, team_id, mode, digest):
+    """The most recent 'done' extraction with identical bytes and mode, if any.
+
+    Matched on content, not filename: a filename like "504.pdf" gets reused
+    across unrelated documents (a different month, a different driver), so
+    only a byte-identical resubmission - a retry, an accidental second upload -
+    should ever be treated as the same document. Returns None unless that
+    extraction still has its output artifacts to hand back.
+    """
+    if not digest:
+        return None
+    row = conn.execute("SELECT id,provider,row_count,cost_brl FROM extractions WHERE team_id=%s AND mode=%s AND content_hash=%s AND status='done' ORDER BY created_at DESC LIMIT 1", (team_id,mode,digest)).fetchone()
+    if not row:
+        return None
+    artifacts = conn.execute("SELECT id,kind,filename,size_bytes FROM artifacts WHERE extraction_id=%s AND kind!='original'", (row['id'],)).fetchall()
+    if not artifacts:
+        return None
+    return row, artifacts
+
+
+def create_extraction(request, filename, mode, content, digest=None):
     selected = team(request)
     extraction_id = uuid4()
     filename = safe_filename(filename or 'documento.pdf')
     key = storage.object_key('raw_files',selected['team_id'],extraction_id,'original.pdf')
     storage.put(key,content,'application/pdf')
     with pool.connection() as conn:
-        conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status) VALUES (%s,%s,%s,%s,%s,'processing')", (extraction_id,selected['team_id'],user(request)['id'],filename,mode))
+        conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status,content_hash) VALUES (%s,%s,%s,%s,%s,'processing',%s)", (extraction_id,selected['team_id'],user(request)['id'],filename,mode,digest or content_hash(content)))
         conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,object_key) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,filename,len(content),key))
     return extraction_id
 

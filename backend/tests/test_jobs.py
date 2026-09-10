@@ -91,3 +91,62 @@ def test_failed_job_is_discarded_and_still_reported_to_the_poller(owner):
         assert conn.execute('SELECT count(*) AS n FROM extractions WHERE id=%s',(job_id,)).fetchone()['n'] == 0
         assert conn.execute('SELECT count(*) AS n FROM uploads WHERE id=%s',(upload,)).fetchone()['n'] == 0
     assert owner.get('/documents',params={'q':'descartado.pdf'}).json()['documents'] == []
+
+
+def test_duplicate_upload_reuses_the_existing_result(owner):
+    app.state.limiter._limiter.storage.reset()
+    pdf = b'%PDF idempotent guia'
+    calls = []
+
+    async def stream(*args):
+        calls.append(args)
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKidempotent').decode(),'excel_filename':'r.xlsx','provider':'gemini-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
+
+    with patch('main.stream_guia_extraction',stream):
+        first_upload = owner.post('/uploads',json={'filename':'guia.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']
+        assert owner.put(f'/uploads/{first_upload}/0',content=pdf).status_code == 200
+        first_id = owner.post(f'/uploads/{first_upload}/process').json()['id']
+        status = {}
+        for _ in range(40):
+            status = owner.get('/documents/'+first_id).json()
+            if status['status'] != 'processing':
+                break
+            time.sleep(.1)
+        assert status['status'] == 'done', status
+
+        second_upload = owner.post('/uploads',json={'filename':'guia-de-novo.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']
+        assert owner.put(f'/uploads/{second_upload}/0',content=pdf).status_code == 200
+        second_id = owner.post(f'/uploads/{second_upload}/process').json()['id']
+
+    assert len(calls) == 1  # the pipeline never ran a second time
+    assert second_id == first_id  # the second upload points at the same document
+    result = owner.get('/documents/'+second_id).json()
+    assert result['status'] == 'done'
+    assert result['artifacts'] == status['artifacts']
+    with pool.connection() as conn:
+        n = conn.execute("SELECT count(*) AS n FROM extractions WHERE filename IN ('guia.pdf','guia-de-novo.pdf')").fetchone()['n']
+    assert n == 1  # no new history row was created for the duplicate
+
+
+def test_duplicate_detection_is_scoped_to_team_and_mode(owner):
+    app.state.limiter._limiter.storage.reset()
+    pdf = b'%PDF idempotent scope check'
+
+    async def stream(*args):
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKscoped').decode(),'excel_filename':'r.xlsx','provider':'gemini-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
+
+    with patch('main.stream_guia_extraction',stream):
+        upload = owner.post('/uploads',json={'filename':'a.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']
+        assert owner.put(f'/uploads/{upload}/0',content=pdf).status_code == 200
+        original_id = owner.post(f'/uploads/{upload}/process').json()['id']
+        for _ in range(40):
+            if owner.get('/documents/'+original_id).json()['status'] != 'processing':
+                break
+            time.sleep(.1)
+
+    other_team = owner.post('/teams',json={'name':'Dedupe isolation'}).json()['id']
+    with patch('main.stream_guia_extraction',stream):
+        upload = owner.post('/uploads',json={'filename':'a.pdf','mode':'guia','size_bytes':len(pdf)},headers={'x-team-id':other_team}).json()['id']
+        assert owner.put(f'/uploads/{upload}/0',content=pdf,headers={'x-team-id':other_team}).status_code == 200
+        other_team_id = owner.post(f'/uploads/{upload}/process',headers={'x-team-id':other_team}).json()['id']
+    assert other_team_id != original_id  # another team's identical file is not the same document

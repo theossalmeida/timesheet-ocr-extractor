@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from database import pool
 import storage
-from documents import discarded, fail_extraction, finish_extraction, processing_lock, safe_filename
+from documents import content_hash, discarded, fail_extraction, find_duplicate, finish_extraction, processing_lock, safe_filename
 from security import team, throttle, user
 
 router = APIRouter()
@@ -97,18 +97,37 @@ def prepare_job(upload_id, request):
         content = b''.join(storage.read(p['object_key']) if p['object_key'] else bytes(p['content']) for p in parts)
         if len(content)!=upload['size_bytes']:
             raise HTTPException(400,'Tamanho do upload inválido.')
+
+        # A byte-identical document already has a result: point this upload at
+        # it instead of storing the PDF again, reprocessing it, or billing a
+        # second Gemini call for it. Matched on content, not the upload's
+        # filename, which gets reused across unrelated documents.
+        digest = content_hash(content)
+        duplicate = find_duplicate(conn,upload['team_id'],upload['mode'],digest)
+        if duplicate:
+            extraction, _ = duplicate
+            conn.execute("UPDATE uploads SET extraction_id=%s WHERE id=%s", (extraction['id'],upload_id))
+            conn.execute("DELETE FROM upload_parts WHERE upload_id=%s", (upload_id,))
+            _discard_upload_parts(parts)
+            logger.info('Upload %s reused extraction %s (identical %s already processed)',upload_id,extraction['id'],upload['mode'])
+            return extraction['id'],None,None
+
         extraction_id = uuid4()
         key = storage.object_key('raw_files',upload['team_id'],extraction_id,'original.pdf')
         storage.put(key,content,'application/pdf')
-        conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status) VALUES (%s,%s,%s,%s,%s,'processing')", (extraction_id,upload['team_id'],upload['user_id'],upload['filename'],upload['mode']))
+        conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status,content_hash) VALUES (%s,%s,%s,%s,%s,'processing',%s)", (extraction_id,upload['team_id'],upload['user_id'],upload['filename'],upload['mode'],digest))
         conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,object_key) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,upload['filename'],len(content),key))
         conn.execute("UPDATE uploads SET extraction_id=%s WHERE id=%s", (extraction_id,upload_id))
         conn.execute("DELETE FROM upload_parts WHERE upload_id=%s", (upload_id,))
+    _discard_upload_parts(parts)
+    return extraction_id,upload,content
+
+
+def _discard_upload_parts(parts):
     for part in parts:
         if part['object_key']:
             try: storage.delete(part['object_key'])
             except Exception: logger.warning('Could not remove completed upload part')
-    return extraction_id,upload,content
 
 
 async def consume_job(extraction_id, upload, content):
