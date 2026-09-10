@@ -1,11 +1,12 @@
 from pathlib import Path
+import certifi
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from config import settings
 
-pool = ConnectionPool(settings.DATABASE_URL, min_size=0, max_size=4, open=False, timeout=15, kwargs={"row_factory": dict_row, "connect_timeout": 10})
+pool = ConnectionPool(settings.DATABASE_URL, min_size=0, max_size=4, open=False, timeout=15, kwargs={"row_factory": dict_row, "connect_timeout": 10, "sslmode": "verify-full", "sslrootcert": certifi.where()})
 
 
 def migrate():

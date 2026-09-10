@@ -6,9 +6,10 @@ from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from database import pool
+import storage
 from security import team, user
 
 router = APIRouter()
@@ -25,22 +26,27 @@ def create_extraction(request, filename, mode, content):
     selected = team(request)
     extraction_id = uuid4()
     filename = safe_filename(filename or 'documento.pdf')
+    key = storage.object_key('raw_files',selected['team_id'],extraction_id,'original.pdf')
+    storage.put(key,content,'application/pdf')
     with pool.connection() as conn:
         conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status) VALUES (%s,%s,%s,%s,%s,'processing')", (extraction_id,selected['team_id'],user(request)['id'],filename,mode))
-        conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,content) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,filename,len(content),content))
+        conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,object_key) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,filename,len(content),key))
     return extraction_id
 
 
 def finish_extraction(extraction_id, event):
     artifacts = []
     with pool.connection() as conn:
+        selected = conn.execute('SELECT team_id FROM extractions WHERE id=%s',(extraction_id,)).fetchone()
         for kind in ('excel','csv'):
             if event.get(kind+'_b64'):
                 content = base64.b64decode(event[kind+'_b64'], validate=True)
                 filename = safe_filename(event[kind+'_filename'])
                 mime = EXCEL_MIME if kind == 'excel' else event.get('csv_mime','text/csv')
                 artifact_id = uuid4()
-                conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,content) VALUES (%s,%s,%s,%s,%s,%s,%s)", (artifact_id,extraction_id,kind,filename,mime,len(content),content))
+                key = storage.object_key('processed_files',selected['team_id'],extraction_id,str(artifact_id))
+                storage.put(key,content,mime)
+                conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,object_key) VALUES (%s,%s,%s,%s,%s,%s,%s)", (artifact_id,extraction_id,kind,filename,mime,len(content),key))
                 artifacts.append({'id':str(artifact_id),'kind':kind,'filename':filename})
         if not artifacts:
             raise ValueError('No generated artifacts')
@@ -108,7 +114,9 @@ def history(request: Request, q: str = Query(default='',max_length=200), offset:
 def download(artifact_id: UUID, request: Request):
     selected = team(request)
     with pool.connection() as conn:
-        artifact = conn.execute("SELECT a.filename,a.mime_type,a.content FROM artifacts a JOIN extractions e ON e.id=a.extraction_id WHERE a.id=%s AND e.team_id=%s", (artifact_id,selected['team_id'])).fetchone()
+        artifact = conn.execute("SELECT a.filename,a.mime_type,a.content,a.object_key FROM artifacts a JOIN extractions e ON e.id=a.extraction_id WHERE a.id=%s AND e.team_id=%s", (artifact_id,selected['team_id'])).fetchone()
     if not artifact:
         raise HTTPException(404,'Arquivo não encontrado.')
-    return Response(bytes(artifact['content']),media_type=artifact['mime_type'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(artifact['filename'],safe=''),'Cache-Control':'no-store'})
+    response_class = StreamingResponse if artifact['object_key'] else Response
+    content = storage.stream(artifact['object_key']) if artifact['object_key'] else bytes(artifact['content'])
+    return response_class(content,media_type=artifact['mime_type'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(artifact['filename'],safe=''),'Cache-Control':'no-store'})

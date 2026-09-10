@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     # field only because services/gemini_service.py (unused/dead code) still
     # references it; services/mistral_service.py (also unused) depends on it too.
     DATABASE_URL: str = ""
+    R2_ENDPOINT_URL: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = "autus"
+    R2_PREFIX: str = ""
     BOOTSTRAP_TOKEN: str = ""
     APP_ORIGIN: str = "http://localhost:3000"
     COOKIE_SECURE: bool = True

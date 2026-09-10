@@ -52,3 +52,7 @@ Run backend suite, database isolation tests, frontend typecheck/build and depend
 - Added 8 MiB chunk uploads and independent background jobs to support 200 MiB documents through Cloudflare without relying on SSE. Three focused tests cover chunk integrity, team boundaries, idempotent starts and completion after logout.
 - Full backend suite before the chunked addition: 215 passed, 1 skipped.
 - User confirmed production host is Windows 11, with timesheet.theosantoro.dev and api.theosantoro.dev. Awaiting remote access and existing Cloudflare configuration paths.
+
+- Storage scope changed at user request: private Cloudflare R2 bucket `autus`, raw_files and processed_files prefixes. Neon now stores object references and metadata; backward-compatible migration supports moving existing binary rows to R2. Nine real R2 integration tests passed; all test objects removed. R2 public development domain is disabled and no public custom domains exist.
+- Updated suite: 218 passed, 2 skipped (optional browser test plus one existing fixture test).
+- Windows access established through Tailscale SSH after user enabled OpenSSH. Existing app runs from C:\Projetos\Timesheet Extractor in interactive processes. Existing named tunnel configuration found; production configuration preserves its routes and OCR settings.

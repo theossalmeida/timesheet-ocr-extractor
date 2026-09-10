@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from database import pool
+import storage
 from documents import fail_extraction, finish_extraction, processing_lock, safe_filename
 from security import team, throttle, user
 
@@ -42,6 +43,9 @@ def start_upload(data: UploadStart, request: Request):
         raise HTTPException(413,'Cartões de ponto devem ter até 50 MB.')
     upload_id = uuid4()
     with pool.connection() as conn:
+        expired = conn.execute('SELECT p.object_key FROM upload_parts p JOIN uploads u ON u.id=p.upload_id WHERE u.expires_at<now()').fetchall()
+        for part in expired:
+            if part['object_key']: storage.delete(part['object_key'])
         conn.execute("DELETE FROM uploads WHERE expires_at<now()")
         conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (current['id'],))
         count = conn.execute("SELECT count(*) AS n FROM uploads WHERE user_id=%s AND extraction_id IS NULL", (current['id'],)).fetchone()['n']
@@ -59,7 +63,9 @@ def store_part(upload_id, part, content, request):
             raise HTTPException(400,'Parte do upload inválida.')
         if part == 0 and not content.startswith(b'%PDF'):
             raise HTTPException(400,'Arquivo inválido. Apenas PDFs são aceitos.')
-        conn.execute("INSERT INTO upload_parts(upload_id,part,content) VALUES (%s,%s,%s) ON CONFLICT(upload_id,part) DO UPDATE SET content=EXCLUDED.content", (upload_id,part,content))
+        key = storage.object_key('raw_files',upload['team_id'],upload_id,f'parts/{part}')
+        storage.put(key,content,'application/octet-stream')
+        conn.execute("INSERT INTO upload_parts(upload_id,part,object_key) VALUES (%s,%s,%s) ON CONFLICT(upload_id,part) DO UPDATE SET object_key=EXCLUDED.object_key,content=NULL", (upload_id,part,key))
     return {'ok':True}
 
 
@@ -74,6 +80,8 @@ async def upload_part(upload_id: UUID, part: int, request: Request):
 def discard_upload(upload_id: UUID, request: Request):
     with pool.connection() as conn:
         owned_upload(conn,upload_id,request)
+        for part in conn.execute('SELECT object_key FROM upload_parts WHERE upload_id=%s',(upload_id,)).fetchall():
+            if part['object_key']: storage.delete(part['object_key'])
         conn.execute("DELETE FROM uploads WHERE id=%s", (upload_id,))
     return {'ok':True}
 
@@ -83,17 +91,23 @@ def prepare_job(upload_id, request):
         upload = owned_upload(conn,upload_id,request)
         if upload['extraction_id']:
             return upload['extraction_id'],None,None
-        parts = conn.execute("SELECT part,content FROM upload_parts WHERE upload_id=%s ORDER BY part", (upload_id,)).fetchall()
+        parts = conn.execute("SELECT part,content,object_key FROM upload_parts WHERE upload_id=%s ORDER BY part", (upload_id,)).fetchall()
         if [p['part'] for p in parts] != list(range((upload['size_bytes']+CHUNK_SIZE-1)//CHUNK_SIZE)):
             raise HTTPException(400,'O upload está incompleto.')
-        content = b''.join(bytes(p['content']) for p in parts)
+        content = b''.join(storage.read(p['object_key']) if p['object_key'] else bytes(p['content']) for p in parts)
         if len(content)!=upload['size_bytes']:
             raise HTTPException(400,'Tamanho do upload inválido.')
         extraction_id = uuid4()
+        key = storage.object_key('raw_files',upload['team_id'],extraction_id,'original.pdf')
+        storage.put(key,content,'application/pdf')
         conn.execute("INSERT INTO extractions(id,team_id,user_id,filename,mode,status) VALUES (%s,%s,%s,%s,%s,'processing')", (extraction_id,upload['team_id'],upload['user_id'],upload['filename'],upload['mode']))
-        conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,content) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,upload['filename'],len(content),content))
+        conn.execute("INSERT INTO artifacts(id,extraction_id,kind,filename,mime_type,size_bytes,object_key) VALUES (%s,%s,'original',%s,'application/pdf',%s,%s)", (uuid4(),extraction_id,upload['filename'],len(content),key))
         conn.execute("UPDATE uploads SET extraction_id=%s WHERE id=%s", (extraction_id,upload_id))
         conn.execute("DELETE FROM upload_parts WHERE upload_id=%s", (upload_id,))
+    for part in parts:
+        if part['object_key']:
+            try: storage.delete(part['object_key'])
+            except Exception: logger.warning('Could not remove completed upload part')
     return extraction_id,upload,content
 
 
