@@ -273,10 +273,9 @@ textarea.input { min-height: 90px; resize: vertical; }
 
 .app-shell { min-height:100vh; display:flex; flex-direction:column; }
 .app-nav { padding:14px 20px; gap:20px; border-bottom:1px solid var(--color-divider); flex-wrap:wrap; }
-.brand-lockup { display:flex; align-items:baseline; gap:10px; margin-right:auto; }
-.brand-lockup .nav-brand { margin:0; font-size:22px; letter-spacing:.06em; }
+.brand-lockup { display:flex; align-items:center; gap:10px; margin-right:auto; }
+.nav-logo { height:28px; width:auto; display:block; }
 .small { font-size:11px; }
-.tagline { font-size:12px; }
 .stack { display:flex; flex-direction:column; gap:14px; }
 .row { display:flex; align-items:center; gap:8px; }
 .wrap { flex-wrap:wrap; }

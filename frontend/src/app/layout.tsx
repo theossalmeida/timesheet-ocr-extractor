@@ -9,7 +9,6 @@ export const metadata: Metadata = {
   title: "AUTUS",
   description:
     "Extraia registros de ponto de PDFs jurídicos trabalhistas e gere planilha Excel automaticamente.",
-  icons: { icon: "/favicon.ico" },
   openGraph: {
     title: "AUTUS",
     description: "Extraia registros de ponto de PDFs jurídicos trabalhistas.",
