@@ -66,7 +66,7 @@ if (Get-Service AutusTunnel -ErrorAction SilentlyContinue) { Start-Service Autus
 $healthy = $false
 for ($attempt=0; $attempt -lt 30; $attempt++) {
     try {
-        $health = Invoke-RestMethod 'http://127.0.0.1:3000/api/health' -TimeoutSec 5
+        $health = Invoke-RestMethod 'http://127.0.0.1:3001/api/health' -TimeoutSec 5
         if ($health.status -eq 'ok' -and $health.version -eq '2.0.0') { $healthy=$true; break }
     } catch { Start-Sleep -Seconds 2 }
 }

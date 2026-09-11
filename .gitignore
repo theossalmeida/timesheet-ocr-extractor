@@ -68,3 +68,4 @@ NEW_FEATURE.md
 merge_pdfs.py
 
 *.log
+.aider*

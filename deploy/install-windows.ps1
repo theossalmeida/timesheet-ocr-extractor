@@ -162,7 +162,7 @@ function Write-Service([string]$Name, [string]$Executable, [string]$Arguments, [
 }
 $runtimeEnv = '<env name="PYTHONUNBUFFERED" value="1" /><env name="PYTHONDONTWRITEBYTECODE" value="1" /><env name="OMP_THREAD_LIMIT" value="2" />'
 Write-Service 'AutusBackend' $runtimePython '-m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --limit-concurrency 16 --timeout-graceful-shutdown 180 --no-proxy-headers --no-access-log' $backend $runtimeEnv
-Write-Service 'AutusFrontend' $NodeExe 'server.js' $frontend '<env name="NODE_ENV" value="production" /><env name="HOSTNAME" value="127.0.0.1" /><env name="PORT" value="3000" /><env name="NEXT_TELEMETRY_DISABLED" value="1" />'
+Write-Service 'AutusFrontend' $NodeExe 'server.js' $frontend '<env name="NODE_ENV" value="production" /><env name="HOSTNAME" value="127.0.0.1" /><env name="PORT" value="3001" /><env name="NEXT_TELEMETRY_DISABLED" value="1" />'
 if (-not $UseExistingTunnelService -and $TunnelConfigFile) {
     $originalConfig = [IO.File]::ReadAllText($TunnelConfigFile)
     $credentialMatch = [regex]::Match($originalConfig, '(?m)^credentials-file:\s*(.+)$')
@@ -211,7 +211,7 @@ Invoke-Checked 'powercfg.exe' @('/change','hibernate-timeout-ac','0')
 $healthy = $false
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     try {
-        $health = Invoke-RestMethod 'http://127.0.0.1:3000/api/health' -TimeoutSec 5
+        $health = Invoke-RestMethod 'http://127.0.0.1:3001/api/health' -TimeoutSec 5
         if ($health.status -eq 'ok' -and $health.version -eq '2.0.0') { $healthy = $true; break }
     } catch { Start-Sleep -Seconds 2 }
 }
