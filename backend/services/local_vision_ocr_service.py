@@ -12,6 +12,7 @@ import httpx
 
 from config import settings
 from models.timesheet import TimesheetRow
+from utils.http_client import ensure_async_client
 from utils.normalizers import normalize_date, normalize_ocorrencia, normalize_time
 
 logger = logging.getLogger(__name__)
@@ -205,15 +206,6 @@ def _preprocess_image_for_vision(image):
             .filter(ImageFilter.SHARPEN)
         )
 
-def _render_full_page_images(pdf_bytes: bytes):
-    from services.tesseract_ocr_service import _render_pdf_pages
-
-    return [
-        _preprocess_image_for_vision(image)
-        for image in _render_pdf_pages(pdf_bytes, dpi=settings.LOCAL_VISION_OCR_DPI)
-    ]
-
-
 def _render_crop_page_images(pdf_bytes: bytes, page_indices=None):
     from services.tesseract_ocr_service import _render_pdf_pages
 
@@ -248,7 +240,9 @@ def _crop_image(image, template: _CropTemplate):
     ))
 
 
-async def _call_ollama(prompt: str, image_b64: str) -> dict[str, Any]:
+async def _call_ollama(
+    prompt: str, image_b64: str, *, client: httpx.AsyncClient | None = None
+) -> dict[str, Any]:
     if not is_local_vision_ocr_configured():
         raise LocalVisionOCRError("local vision OCR is not configured")
 
@@ -261,11 +255,11 @@ async def _call_ollama(prompt: str, image_b64: str) -> dict[str, Any]:
         "format": "json",
         "options": {"temperature": 0, "num_ctx": settings.LOCAL_VISION_OCR_NUM_CTX},
     }
-    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
 
+    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
+        async with ensure_async_client(client, timeout) as active_client:
+            response = await active_client.post(url, json=payload)
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         raise LocalVisionConnectionError(
             _connection_error_message("Ollama", url)
@@ -282,7 +276,9 @@ async def _call_ollama(prompt: str, image_b64: str) -> dict[str, Any]:
         raise LocalVisionOCRError("local vision OCR returned an empty response")
     return _model_text_to_payload(text)
 
-async def _call_lmstudio(prompt: str, image_b64: str) -> dict[str, Any]:
+async def _call_lmstudio(
+    prompt: str, image_b64: str, *, client: httpx.AsyncClient | None = None
+) -> dict[str, Any]:
     if not is_local_vision_ocr_configured():
         raise LocalVisionOCRError("local vision OCR is not configured")
 
@@ -334,11 +330,11 @@ async def _call_lmstudio(prompt: str, image_b64: str) -> dict[str, Any]:
             },
         },
     }
-    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
 
+    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
+        async with ensure_async_client(client, timeout) as active_client:
+            response = await active_client.post(url, json=payload)
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         raise LocalVisionConnectionError(
             _connection_error_message("LM Studio", url)
@@ -368,11 +364,13 @@ async def _call_lmstudio(prompt: str, image_b64: str) -> dict[str, Any]:
     return _model_text_to_payload(text)
 
 
-async def _call_vision_model(prompt: str, image_b64: str) -> dict[str, Any]:
+async def _call_vision_model(
+    prompt: str, image_b64: str, *, client: httpx.AsyncClient | None = None
+) -> dict[str, Any]:
     provider = _resolved_provider()
     if provider == "lmstudio":
-        return await _call_lmstudio(prompt, image_b64)
-    return await _call_ollama(prompt, image_b64)
+        return await _call_lmstudio(prompt, image_b64, client=client)
+    return await _call_ollama(prompt, image_b64, client=client)
 
 def _rows_from_payload(payload: dict[str, Any]) -> list[TimesheetRow]:
     raw_rows = payload.get("rows")
@@ -654,7 +652,10 @@ def _best_template_name(
 
 
 async def _select_service_crop_template(
-    crop_images, sample_count: int | None = None
+    crop_images,
+    sample_count: int | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[_CropTemplate | None, bool]:
     sample_count = min(sample_count or _SAMPLE_PAGES, len(crop_images))
     if sample_count == 0:
@@ -670,7 +671,7 @@ async def _select_service_crop_template(
         page_keys: dict[str, tuple[str, str, str]] = {}
         for template in _SERVICE_CROP_TEMPLATES:
             crop_b64 = _image_to_base64(_crop_image(page_image, template))
-            payload = await _call_vision_model(_SERVICE_FORM_PROMPT, crop_b64)
+            payload = await _call_vision_model(_SERVICE_FORM_PROMPT, crop_b64, client=client)
             records = _records_from_payload(
                 payload,
                 require_service_evidence=True,
@@ -703,70 +704,112 @@ async def _select_service_crop_template(
     return best, True
 
 
-async def _service_form_record_from_template(page_image, template: _CropTemplate) -> tuple[list[dict], bool]:
+async def _service_form_record_from_template(
+    page_image, template: _CropTemplate, *, client: httpx.AsyncClient | None = None
+) -> tuple[list[dict], bool]:
     crop_b64 = _image_to_base64(_crop_image(page_image, template))
-    payload = await _call_vision_model(_SERVICE_FORM_PROMPT, crop_b64)
+    payload = await _call_vision_model(_SERVICE_FORM_PROMPT, crop_b64, client=client)
     records = _records_from_payload(payload, require_service_evidence=True, include_meta=True)
     return records[:1], bool(records)
+
+
+def _resize_to_dpi(image, from_dpi: int, to_dpi: int):
+    # Downscales an already-preprocessed image. Only safe to reuse in place of a
+    # native render when from_dpi == to_dpi (a no-op); otherwise this LANCZOS
+    # downscale is not equivalent to rendering+preprocessing natively at to_dpi.
+    if from_dpi == to_dpi:
+        return image
+    from PIL import Image
+
+    scale = to_dpi / from_dpi
+    new_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(new_size, Image.LANCZOS)
+
+
+def _render_full_page_images(pdf_bytes: bytes):
+    from services.tesseract_ocr_service import _render_pdf_pages
+
+    return [
+        _preprocess_image_for_vision(image)
+        for image in _render_pdf_pages(pdf_bytes, dpi=settings.LOCAL_VISION_OCR_DPI)
+    ]
 
 
 async def extract_timesheet_rows_local_vision(pdf_bytes: bytes) -> list[TimesheetRow]:
     if not is_local_vision_ocr_configured():
         return []
 
-    full_images = _render_full_page_images(pdf_bytes)
     crop_images = _render_crop_page_images(pdf_bytes)
-    template, service_attempted = await _select_service_crop_template(crop_images)
 
-    rows: list[TimesheetRow] = []
-    if template is not None:
-        for page_index, page_image in enumerate(crop_images, start=1):
-            service_records, _ = await _service_form_record_from_template(
-                page_image, template
-            )
-            guia_rows = _guia_records_to_rows(service_records)
-            if guia_rows:
-                logger.info(
-                    "local vision OCR: page %d matched service-form template %s with %d row(s)",
-                    page_index,
-                    template.name,
-                    len(guia_rows),
-                )
-                rows.extend(guia_rows)
-            else:
-                logger.info(
-                    "local vision OCR: page %d had no service-form row with template %s",
-                    page_index,
-                    template.name,
-                )
-        if rows:
-            return rows
-        logger.info(
-            "local vision OCR: selected service-form template yielded no rows; "
-            "trying full page prompt"
+    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        template, service_attempted = await _select_service_crop_template(
+            crop_images, client=client
         )
-    elif service_attempted:
-        logger.info(
-            "local vision OCR: service-form crops were seen but no stable template "
-            "was selected; trying full page prompt"
-        )
-    for page_index, image in enumerate(full_images, start=1):
-        payload = await _call_vision_model(_TIMESHEET_PROMPT, _image_to_base64(image))
-        page_rows = _rows_from_payload(payload)
-        if not page_rows:
+
+        rows: list[TimesheetRow] = []
+        if template is not None:
+            for page_index, page_image in enumerate(crop_images, start=1):
+                service_records, _ = await _service_form_record_from_template(
+                    page_image, template, client=client
+                )
+                guia_rows = _guia_records_to_rows(service_records)
+                if guia_rows:
+                    logger.info(
+                        "local vision OCR: page %d matched service-form template %s with %d row(s)",
+                        page_index,
+                        template.name,
+                        len(guia_rows),
+                    )
+                    rows.extend(guia_rows)
+                else:
+                    logger.info(
+                        "local vision OCR: page %d had no service-form row with template %s",
+                        page_index,
+                        template.name,
+                    )
+            if rows:
+                return rows
             logger.info(
-                "local vision OCR: page %d full-page payload yielded no rows (%s)",
-                page_index,
-                _payload_shape_summary(payload),
+                "local vision OCR: selected service-form template yielded no rows; "
+                "trying full page prompt"
             )
-        if page_rows:
+        elif service_attempted:
             logger.info(
-                "local vision OCR: page %d found %d timesheet row(s)",
-                page_index,
-                len(page_rows),
+                "local vision OCR: service-form crops were seen but no stable template "
+                "was selected; trying full page prompt"
             )
-        rows.extend(page_rows)
-    return rows
+
+        # crop_images are rendered at max(DPI, 300). When DPI >= 300 that's
+        # already the resolution the full-page prompt needs, so reuse them
+        # (resize is a no-op) instead of re-rendering the whole PDF a second
+        # time. When DPI < 300, downscaling the 300dpi-preprocessed crops would
+        # not match a native render+preprocess at the lower DPI, so render
+        # natively instead to avoid drifting OCR results for that config.
+        if settings.LOCAL_VISION_OCR_DPI >= 300:
+            full_images = [
+                _resize_to_dpi(image, max(settings.LOCAL_VISION_OCR_DPI, 300), settings.LOCAL_VISION_OCR_DPI)
+                for image in crop_images
+            ]
+        else:
+            full_images = _render_full_page_images(pdf_bytes)
+        for page_index, image in enumerate(full_images, start=1):
+            payload = await _call_vision_model(_TIMESHEET_PROMPT, _image_to_base64(image), client=client)
+            page_rows = _rows_from_payload(payload)
+            if not page_rows:
+                logger.info(
+                    "local vision OCR: page %d full-page payload yielded no rows (%s)",
+                    page_index,
+                    _payload_shape_summary(payload),
+                )
+            if page_rows:
+                logger.info(
+                    "local vision OCR: page %d found %d timesheet row(s)",
+                    page_index,
+                    len(page_rows),
+                )
+            rows.extend(page_rows)
+        return rows
 
 
 GUIA_PROBE_PAGES = 2
@@ -807,8 +850,10 @@ def _page_confidence(record: dict | None) -> float:
     return (1 if score is None else int(score)) / 3
 
 
-async def _guia_page_outcome(page_image, template, page_number: int) -> GuiaPageOutcome:
-    records, _ = await _service_form_record_from_template(page_image, template)
+async def _guia_page_outcome(
+    page_image, template, page_number: int, *, client: httpx.AsyncClient | None = None
+) -> GuiaPageOutcome:
+    records, _ = await _service_form_record_from_template(page_image, template, client=client)
     record = records[0] if records else None
     return GuiaPageOutcome(page_number, record, _page_confidence(record))
 
@@ -836,34 +881,37 @@ async def run_guia_local(
 
     probe_count = max(1, min(probe_pages, total))
     probe_images = _render_crop_page_images(pdf_bytes, range(probe_count))
-    template, attempted = await _select_service_crop_template(
-        probe_images, sample_count=probe_count
-    )
-    if template is None:
-        return GuiaLocalRun(
-            0.0, False, [],
-            "no stable service-form crop template"
-            if attempted else "no service-form fields found",
+
+    timeout = httpx.Timeout(settings.LOCAL_VISION_OCR_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        template, attempted = await _select_service_crop_template(
+            probe_images, sample_count=probe_count, client=client
         )
+        if template is None:
+            return GuiaLocalRun(
+                0.0, False, [],
+                "no stable service-form crop template"
+                if attempted else "no service-form fields found",
+            )
 
-    outcomes = [
-        await _guia_page_outcome(image, template, number)
-        for number, image in enumerate(probe_images, start=1)
-    ]
-    confidence = sum(o.confidence for o in outcomes) / len(outcomes)
-    logger.info(
-        "local vision OCR: guia probe read %d page(s) at %.0f%% confidence",
-        len(outcomes), confidence * 100,
-    )
-    if confidence <= threshold:
-        return GuiaLocalRun(
-            confidence, False, [], f"probe confidence {confidence:.0%}"
+        outcomes = [
+            await _guia_page_outcome(image, template, number, client=client)
+            for number, image in enumerate(probe_images, start=1)
+        ]
+        confidence = sum(o.confidence for o in outcomes) / len(outcomes)
+        logger.info(
+            "local vision OCR: guia probe read %d page(s) at %.0f%% confidence",
+            len(outcomes), confidence * 100,
         )
+        if confidence <= threshold:
+            return GuiaLocalRun(
+                confidence, False, [], f"probe confidence {confidence:.0%}"
+            )
 
-    # The probe pages are already read; only the remainder still needs a call.
-    if total > probe_count:
-        rest = _render_crop_page_images(pdf_bytes, range(probe_count, total))
-        for number, image in enumerate(rest, start=probe_count + 1):
-            outcomes.append(await _guia_page_outcome(image, template, number))
+        # The probe pages are already read; only the remainder still needs a call.
+        if total > probe_count:
+            rest = _render_crop_page_images(pdf_bytes, range(probe_count, total))
+            for number, image in enumerate(rest, start=probe_count + 1):
+                outcomes.append(await _guia_page_outcome(image, template, number, client=client))
 
-    return GuiaLocalRun(confidence, True, outcomes)
+        return GuiaLocalRun(confidence, True, outcomes)

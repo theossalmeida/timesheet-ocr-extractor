@@ -302,7 +302,7 @@ def _probe(monkeypatch, page_records, *, pages=2):
     queue = list(page_records)
     monkeypatch.setattr(
         service, "_service_form_record_from_template",
-        AsyncMock(side_effect=lambda image, template: ([queue.pop(0)] if queue and queue[0] else [], True)),
+        AsyncMock(side_effect=lambda image, template, **_: ([queue.pop(0)] if queue and queue[0] else [], True)),
     )
 
 
@@ -407,3 +407,87 @@ def test_service_evidence_rejects_a_record_read_off_the_signature():
         "entrada_source": "assinatura eletronica",
         "saida_source": "assinatura eletronica",
     })
+
+
+@pytest.mark.asyncio
+async def test_service_form_success_skips_full_page_rendering(monkeypatch):
+    from services import local_vision_ocr_service as service
+
+    monkeypatch.setattr(service, "is_local_vision_ocr_configured", lambda: True)
+    monkeypatch.setattr(service, "_render_crop_page_images", MagicMock(return_value=[object()]))
+    resize = MagicMock()
+    monkeypatch.setattr(service, "_resize_to_dpi", resize)
+    monkeypatch.setattr(service, "_select_service_crop_template", AsyncMock(
+        return_value=(service._SERVICE_CROP_TEMPLATES[0], True)
+    ))
+    monkeypatch.setattr(service, "_service_form_record_from_template", AsyncMock(
+        return_value=([{"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}], True)
+    ))
+
+    rows = await service.extract_timesheet_rows_local_vision(b"pdf")
+
+    assert [row.marcacoes for row in rows] == [["08:00", "17:00"]]
+    resize.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dpi", [300, 400])
+async def test_full_page_fallback_downscales_crop_images_instead_of_rerendering(monkeypatch, dpi):
+    """crop_images are rendered at max(DPI, 300). When DPI >= 300 that resize is
+    a no-op, so the full-page fallback must reuse crop_images instead of
+    re-rendering the whole PDF a second time."""
+    from services import local_vision_ocr_service as service
+
+    crop_image = object()
+    resized_image = object()
+    monkeypatch.setattr(service, "is_local_vision_ocr_configured", lambda: True)
+    monkeypatch.setattr(service.settings, "LOCAL_VISION_OCR_DPI", dpi)
+    monkeypatch.setattr(service, "_render_crop_page_images", MagicMock(return_value=[crop_image]))
+    resize = MagicMock(return_value=resized_image)
+    monkeypatch.setattr(service, "_resize_to_dpi", resize)
+    render_full = MagicMock()
+    monkeypatch.setattr(service, "_render_full_page_images", render_full)
+    monkeypatch.setattr(service, "_select_service_crop_template", AsyncMock(return_value=(None, False)))
+    encode = MagicMock(return_value="image")
+    monkeypatch.setattr(service, "_image_to_base64", encode)
+    monkeypatch.setattr(service, "_call_vision_model", AsyncMock(return_value={
+        "rows": [{"data": "01/03/2024", "marcacoes": ["08:00", "17:00"]}]
+    }))
+
+    rows = await service.extract_timesheet_rows_local_vision(b"pdf")
+
+    assert [row.marcacoes for row in rows] == [["08:00", "17:00"]]
+    resize.assert_called_once_with(crop_image, max(dpi, 300), dpi)
+    encode.assert_called_once_with(resized_image)
+    render_full.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_full_page_fallback_rerenders_natively_below_300_dpi(monkeypatch):
+    """When LOCAL_VISION_OCR_DPI < 300, reusing the 300dpi-preprocessed
+    crop_images (downscaled) would not match a native render+preprocess at the
+    configured DPI, so the full-page fallback must render natively instead."""
+    from services import local_vision_ocr_service as service
+
+    crop_image = object()
+    native_image = object()
+    monkeypatch.setattr(service, "is_local_vision_ocr_configured", lambda: True)
+    monkeypatch.setattr(service.settings, "LOCAL_VISION_OCR_DPI", 200)
+    monkeypatch.setattr(service, "_render_crop_page_images", MagicMock(return_value=[crop_image]))
+    resize = MagicMock()
+    monkeypatch.setattr(service, "_resize_to_dpi", resize)
+    render_full = MagicMock(return_value=[native_image])
+    monkeypatch.setattr(service, "_render_full_page_images", render_full)
+    monkeypatch.setattr(service, "_select_service_crop_template", AsyncMock(return_value=(None, False)))
+    encode = MagicMock(return_value="image")
+    monkeypatch.setattr(service, "_image_to_base64", encode)
+    monkeypatch.setattr(service, "_call_vision_model", AsyncMock(return_value={
+        "rows": [{"data": "01/03/2024", "marcacoes": ["08:00", "17:00"]}]
+    }))
+
+    rows = await service.extract_timesheet_rows_local_vision(b"pdf")
+
+    assert [row.marcacoes for row in rows] == [["08:00", "17:00"]]
+    render_full.assert_called_once_with(b"pdf")
+    resize.assert_not_called()
+    encode.assert_called_once_with(native_image)

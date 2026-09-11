@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -88,6 +89,17 @@ def discard_upload(upload_id: UUID, request: Request):
     return {'ok':True}
 
 
+def _read_upload_part(part):
+    return storage.read(part['object_key']) if part['object_key'] else bytes(part['content'])
+
+
+def _read_upload_parts(parts):
+    if len(parts) <= 1:
+        return b''.join(_read_upload_part(part) for part in parts)
+    with ThreadPoolExecutor(max_workers=min(4,len(parts))) as executor:
+        return b''.join(executor.map(_read_upload_part,parts))
+
+
 def prepare_job(upload_id, request, can_start=True):
     with pool.connection() as conn:
         upload = owned_upload(conn,upload_id,request)
@@ -96,7 +108,7 @@ def prepare_job(upload_id, request, can_start=True):
         parts = conn.execute("SELECT part,content,object_key FROM upload_parts WHERE upload_id=%s ORDER BY part", (upload_id,)).fetchall()
         if [p['part'] for p in parts] != list(range((upload['size_bytes']+CHUNK_SIZE-1)//CHUNK_SIZE)):
             raise HTTPException(400,'O upload está incompleto.')
-        content = b''.join(storage.read(p['object_key']) if p['object_key'] else bytes(p['content']) for p in parts)
+        content = _read_upload_parts(parts)
         if len(content)!=upload['size_bytes']:
             raise HTTPException(400,'Tamanho do upload inválido.')
 

@@ -233,12 +233,14 @@ async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
     # produces false negatives (e.g. reports whose summary pages fail the meaningful-text
     # heuristic get flagged "mixed"/"scanned" even though pdfplumber reads them fully).
     # OCR is the fallback, only reached when pdfplumber yields nothing for a page.
-    rows = await asyncio.to_thread(extract_with_pdfplumber, pdf_bytes)
+    pdfplumber_cache: dict = {}
+    rows = await asyncio.to_thread(extract_with_pdfplumber, pdf_bytes, _cache=pdfplumber_cache)
 
     if rows:
         # Check for scanned pages mixed into the same PDF (e.g. digital-signature wrappers
-        # around image-only timesheets after the native-text section).
-        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes)
+        # around image-only timesheets after the native-text section). Reuses the
+        # pdfplumber pass just done above instead of re-parsing the PDF.
+        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes, _cache=pdfplumber_cache)
         if scanned_bytes:
             pdf_type = "mixed"
             logger.info("Hybrid PDF: found scanned pages - running local Tesseract OCR")
@@ -261,7 +263,7 @@ async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
                         logger.info("Hybrid local-vision merge - total rows=%d", len(rows))
 
     if not rows:
-        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes)
+        scanned_bytes = await asyncio.to_thread(get_scanned_page_bytes, pdf_bytes, _cache=pdfplumber_cache)
         tesseract_bytes = scanned_bytes or pdf_bytes
         rows = await asyncio.to_thread(_run_tesseract_timesheet, tesseract_bytes)
         if rows:

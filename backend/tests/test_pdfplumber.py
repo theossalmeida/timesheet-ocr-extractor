@@ -168,3 +168,50 @@ def test_weekday_first_multiple_days():
     )
     rows = _parse_weekday_first_rows(text)
     assert [r.data for r in rows] == ["01/01/2021", "02/01/2021", "03/01/2021"]
+
+
+def test_text_fallback_reuses_pdf_and_tables():
+    pdf = _mock_pdf_no_table()
+    pdf.pages[0].extract_text.return_value = "01/03/2024 sexta 08:00 17:00"
+
+    with patch("pdfplumber.open", return_value=pdf) as open_pdf:
+        rows = extract_with_pdfplumber(b"fake")
+
+    assert [(row.data, row.marcacoes) for row in rows] == [
+        ("01/03/2024", ["08:00", "17:00"])
+    ]
+    open_pdf.assert_called_once()
+    pdf.pages[0].extract_tables.assert_called_once()
+    pdf.close.assert_called_once()
+
+
+def test_structured_rows_keep_precedence_over_multirow_cells():
+    pdf = _mock_pdf_with_table([["23/jun/15 segunda 08:00 17:00\n24/jun/15 terca 09:00 18:00"]])
+    second_page = _mock_pdf_with_table([["01/03/2024", "08:00", "17:00"]]).pages[0]
+    pdf.pages.append(second_page)
+
+    with patch("pdfplumber.open", return_value=pdf):
+        rows = extract_with_pdfplumber(b"fake")
+
+    assert [row.data for row in rows] == ["01/03/2024"]
+
+
+def test_scanned_page_detection_reuses_tables():
+    from services.pdfplumber_service import get_scanned_page_bytes
+
+    pdf = _mock_pdf_no_table()
+    pdf.__enter__.return_value = pdf
+    pdf.pages[0].images = [object()]
+    reader = MagicMock()
+    reader.pages = [object()]
+    writer = MagicMock()
+    writer.write.side_effect = lambda output: output.write(b"selected")
+
+    with (
+        patch("pdfplumber.open", return_value=pdf),
+        patch("services.pdfplumber_service.pypdf.PdfReader", return_value=reader),
+        patch("services.pdfplumber_service.pypdf.PdfWriter", return_value=writer),
+    ):
+        assert get_scanned_page_bytes(b"fake") == b"selected"
+
+    pdf.pages[0].extract_tables.assert_called_once()

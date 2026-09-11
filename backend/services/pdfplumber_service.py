@@ -2,6 +2,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+from typing import Any
 
 import pdfplumber
 import pypdf
@@ -380,153 +381,200 @@ def _detect_columns(header_rows: list[list[str | None]]) -> dict[str, int | None
     }
 
 
-def extract_with_pdfplumber(pdf_bytes: bytes) -> list[TimesheetRow] | None:
+def _structured_rows_from_tables(page_tables: list[list]) -> list[TimesheetRow]:
+    all_rows: list[TimesheetRow] = []
+    for tables in page_tables:
+        for table in tables:
+            if not table:
+                continue
+            cols = _detect_columns(table)
+            if cols["date"] is None:
+                continue
+            for row in table:
+                if not row:
+                    continue
+                date_cell = str(row[cols["date"]] or "").strip()
+                if not _DATE_RE.search(date_cell):
+                    continue
+                normalized_date = normalize_date(date_cell)
+                if not normalized_date:
+                    continue
+
+                def get(idx: int | None) -> str | None:
+                    if idx is None or idx >= len(row):
+                        return None
+                    return str(row[idx] or "").strip() or None
+
+                occ_raw, occ_tipo = normalize_ocorrencia(get(cols["occ"]) or "")
+                marcacoes = [t for t in (
+                    normalize_time(get(cols["entry1"]) or ""),
+                    normalize_time(get(cols["exit1"]) or ""),
+                    normalize_time(get(cols["entry2"]) or ""),
+                    normalize_time(get(cols["exit2"]) or ""),
+                ) if t]
+                all_rows.append(TimesheetRow(
+                    data=normalized_date,
+                    marcacoes=marcacoes,
+                    ocorrencia_raw=occ_raw,
+                    ocorrencia_tipo=occ_tipo,
+                ))
+    return all_rows
+
+
+def _multirow_rows_from_tables(page_tables: list[list]) -> list[TimesheetRow]:
+    multirow_rows: list[TimesheetRow] = []
+    for tables in page_tables:
+        for table in tables:
+            for row in (table or []):
+                for cell in (row or []):
+                    if not cell:
+                        continue
+                    cell_str = str(cell)
+                    if "\n" in cell_str and _MULTIROW_DATE_RE.search(cell_str):
+                        multirow_rows.extend(_parse_multirow_cell(cell_str))
+    return multirow_rows
+
+
+def _page_has_image(page, i: int, reader: pypdf.PdfReader | None) -> bool:
+    has_image = bool(page.images)
+    if not has_image and reader is not None and i < len(reader.pages):
+        has_image = _pypdf_page_has_image(reader.pages[i])
+    return has_image
+
+
+def _is_scanned_page(text: str, tables: list) -> bool:
+    """A page is "scanned" when none of the three extraction strategies find
+    any timesheet rows in its own text/tables."""
+    if _parse_text_rows(text):
+        return False
+
+    has_multirow = any(
+        _MULTIROW_DATE_RE.search(str(cell or ""))
+        for table in tables
+        for row in (table or [])
+        for cell in (row or [])
+        if cell and "\n" in str(cell)
+    )
+    if has_multirow:
+        return False
+
+    has_date_table = any(
+        _detect_columns(table)["date"] is not None
+        for table in tables
+        if table
+    )
+    return not has_date_table
+
+
+def _analyze_pdfplumber(
+    pdf_bytes: bytes, *, need_rows: bool = True, need_scanned: bool = True
+) -> tuple[list[TimesheetRow] | None, bytes | None]:
+    """Run pdfplumber over the PDF exactly once, computing both the parsed
+    timesheet rows and the scanned-page sub-PDF from the same cached
+    per-page tables/text instead of re-opening and re-parsing the PDF for
+    each concern separately."""
+    reader: pypdf.PdfReader | None = None
+    if need_scanned:
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        except Exception as e:
+            logger.debug("_analyze_pdfplumber: pypdf image scan unavailable: %s", e)
+            reader = None
+
+    rows: list[TimesheetRow] | None = None
+    scanned_bytes: bytes | None = None
     pdf = None
     try:
         pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
         logger.info("pdfplumber: opened PDF — pages=%d", len(pdf.pages))
-        all_rows: list[TimesheetRow] = []
 
+        page_tables: list[list] = []
+        page_text: dict[int, str] = {}
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table:
-                    continue
-                cols = _detect_columns(table)
-                if cols["date"] is None:
-                    continue
-                for row in table:
-                    if not row:
-                        continue
-                    date_cell = str(row[cols["date"]] or "").strip()
-                    if not _DATE_RE.search(date_cell):
-                        continue
-                    normalized_date = normalize_date(date_cell)
-                    if not normalized_date:
-                        continue
+            page_tables.append(page.extract_tables())
 
-                    def get(idx: int | None) -> str | None:
-                        if idx is None or idx >= len(row):
-                            return None
-                        return str(row[idx] or "").strip() or None
+        if need_rows:
+            all_rows = _structured_rows_from_tables(page_tables)
+            logger.info("pdfplumber: structured table — rows=%d", len(all_rows))
+            if all_rows:
+                rows = all_rows
+            else:
+                multirow_rows = _multirow_rows_from_tables(page_tables)
+                logger.info("pdfplumber: multirow cell — rows=%d", len(multirow_rows))
+                if multirow_rows:
+                    rows = multirow_rows
+                else:
+                    for i, page in enumerate(pdf.pages):
+                        page_text[i] = page.extract_text() or ""
+                    full_text = "\n".join(page_text[i] for i in range(len(pdf.pages)))
+                    text_rows = (
+                        _parse_peg_larg_rows(full_text)
+                        or _parse_text_rows(full_text)
+                        or _parse_weekday_first_rows(full_text)
+                    )
+                    logger.info("pdfplumber: text fallback — rows=%d", len(text_rows))
+                    rows = text_rows if text_rows else None
 
-                    occ_raw, occ_tipo = normalize_ocorrencia(get(cols["occ"]) or "")
-                    marcacoes = [t for t in (
-                        normalize_time(get(cols["entry1"]) or ""),
-                        normalize_time(get(cols["exit1"]) or ""),
-                        normalize_time(get(cols["entry2"]) or ""),
-                        normalize_time(get(cols["exit2"]) or ""),
-                    ) if t]
-                    all_rows.append(TimesheetRow(
-                        data=normalized_date,
-                        marcacoes=marcacoes,
-                        ocorrencia_raw=occ_raw,
-                        ocorrencia_tipo=occ_tipo,
-                    ))
+        if need_scanned:
+            scanned_indices: list[int] = []
+            for i, page in enumerate(pdf.pages):
+                if not _page_has_image(page, i, reader):
+                    continue  # no images → cannot be a scanned page
+                text = page_text.get(i)
+                if text is None:
+                    text = page.extract_text() or ""
+                if _is_scanned_page(text, page_tables[i]):
+                    scanned_indices.append(i)
 
-        logger.info("pdfplumber: structured table — rows=%d", len(all_rows))
-        if all_rows:
-            return all_rows
+            if scanned_indices and reader is not None:
+                logger.info(
+                    "get_scanned_page_bytes: found %d scanned page(s) — indices %s",
+                    len(scanned_indices),
+                    scanned_indices,
+                )
+                writer = pypdf.PdfWriter()
+                for idx in scanned_indices:
+                    writer.add_page(reader.pages[idx])
+                out = io.BytesIO()
+                writer.write(out)
+                scanned_bytes = out.getvalue()
 
-        # Fallback: scan for multi-row merged cells (labor-court format)
-        pdf.close()
-        pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
-        multirow_rows: list[TimesheetRow] = []
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in (table or []):
-                    for cell in (row or []):
-                        if not cell:
-                            continue
-                        cell_str = str(cell)
-                        if "\n" in cell_str and _MULTIROW_DATE_RE.search(cell_str):
-                            multirow_rows.extend(_parse_multirow_cell(cell_str))
-        logger.info("pdfplumber: multirow cell — rows=%d", len(multirow_rows))
-        if multirow_rows:
-            return multirow_rows
-
-        # Fallback: plain text extraction (FOLHA DE PONTO fixed-width format,
-        # or "Cartao de Ponto ES." weekday-first format)
-        pdf.close()
-        pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
-        full_text = "\n".join(
-            (page.extract_text() or "") for page in pdf.pages
-        )
-        text_rows = (
-            _parse_peg_larg_rows(full_text)
-            or _parse_text_rows(full_text)
-            or _parse_weekday_first_rows(full_text)
-        )
-        logger.info("pdfplumber: text fallback — rows=%d", len(text_rows))
-        return text_rows if text_rows else None
+        return rows, scanned_bytes
     finally:
         if pdf is not None:
             pdf.close()
 
 
-def get_scanned_page_bytes(pdf_bytes: bytes) -> bytes | None:
+def extract_with_pdfplumber(
+    pdf_bytes: bytes, *, _cache: dict[str, Any] | None = None
+) -> list[TimesheetRow] | None:
+    """`_cache` lets a caller that will also call `get_scanned_page_bytes` on
+    the same bytes (see main.py) share one pdfplumber pass between the two
+    calls instead of paying for a second full parse."""
+    if _cache is not None and "result" in _cache:
+        return _cache["result"][0]
+    rows, scanned_bytes = _analyze_pdfplumber(pdf_bytes, need_scanned=_cache is not None)
+    if _cache is not None:
+        _cache["result"] = (rows, scanned_bytes)
+    return rows
+
+
+def get_scanned_page_bytes(
+    pdf_bytes: bytes, *, _cache: dict[str, Any] | None = None
+) -> bytes | None:
     """Return a sub-PDF containing pages whose timesheet content is in images.
 
     A page is considered "scanned" when it has at least one embedded image
     AND none of the three pdfplumber extraction strategies find any timesheet
     rows in its text/tables.  Returns None when no such pages are found.
+
+    `_cache` lets a caller that already called `extract_with_pdfplumber` on
+    the same bytes with the same `_cache` dict reuse that pass instead of
+    re-parsing the PDF from scratch.
     """
-    scanned_indices: list[int] = []
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-    except Exception as e:
-        logger.debug("get_scanned_page_bytes: pypdf image scan unavailable: %s", e)
-        reader = None
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for i, page in enumerate(pdf.pages):
-            has_image = bool(page.images)
-            if not has_image and reader is not None and i < len(reader.pages):
-                has_image = _pypdf_page_has_image(reader.pages[i])
-            if not has_image:
-                continue  # no images → cannot be a scanned page
-
-            text = page.extract_text() or ""
-
-            # Strategy 1: fixed-width text rows
-            if _parse_text_rows(text):
-                continue
-
-            # Strategy 2: multirow merged cells
-            has_multirow = any(
-                _MULTIROW_DATE_RE.search(str(cell or ""))
-                for table in (page.extract_tables() or [])
-                for row in (table or [])
-                for cell in (row or [])
-                if cell and "\n" in str(cell)
-            )
-            if has_multirow:
-                continue
-
-            # Strategy 3: structured table with a date column
-            has_date_table = any(
-                _detect_columns(table)["date"] is not None
-                for table in (page.extract_tables() or [])
-                if table
-            )
-            if has_date_table:
-                continue
-
-            scanned_indices.append(i)
-
-    if not scanned_indices:
-        return None
-
-    logger.info(
-        "get_scanned_page_bytes: found %d scanned page(s) — indices %s",
-        len(scanned_indices),
-        scanned_indices,
-    )
-    if reader is None:
-        return None
-    writer = pypdf.PdfWriter()
-    for idx in scanned_indices:
-        writer.add_page(reader.pages[idx])
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
+    if _cache is not None and "result" in _cache:
+        return _cache["result"][1]
+    rows, scanned_bytes = _analyze_pdfplumber(pdf_bytes, need_rows=_cache is not None)
+    if _cache is not None:
+        _cache["result"] = (rows, scanned_bytes)
+    return scanned_bytes

@@ -15,11 +15,13 @@ logger = logging.getLogger(__name__)
 from config import settings
 from models.timesheet import TimesheetRow
 from services import ai_usage
+from utils.http_client import ensure_async_client
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia
 
 GEMINI_PAGE_CHUNK_SIZE = 2
 GEMINI_TIMEOUT_SECONDS = 180.0
 GEMINI_RETRIES = 2
+GEMINI_MAX_CONCURRENT_CHUNKS = 3
 
 
 def is_gemini_configured() -> bool:
@@ -190,7 +192,9 @@ def _parse_gemini_response(response_json: dict, kind: str) -> list[TimesheetRow]
     return _rows_from_payload(payload)
 
 
-async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
+async def extract_with_gemini(
+    pdf_bytes: bytes, *, client: httpx.AsyncClient | None = None
+) -> list[TimesheetRow]:
     if not is_gemini_configured():
         return []
 
@@ -216,8 +220,9 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
     response = None
     for attempt in range(1, GEMINI_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS)) as client:
-                response = await client.post(
+            timeout = httpx.Timeout(GEMINI_TIMEOUT_SECONDS)
+            async with ensure_async_client(client, timeout) as active_client:
+                response = await active_client.post(
                     _gemini_url(),
                     params={"key": settings.GEMINI_API_KEY},
                     json=body,
@@ -251,8 +256,11 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
     return _parse_gemini_response(response.json(), "extract")
 
 
-def _split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int) -> list[bytes]:
-    reader = pypdf.PdfReader(BytesIO(pdf_bytes))
+def _split_pdf_into_chunks(
+    pdf_bytes: bytes, chunk_size: int, *, reader: pypdf.PdfReader | None = None
+) -> list[bytes]:
+    if reader is None:
+        reader = pypdf.PdfReader(BytesIO(pdf_bytes))
     chunks: list[bytes] = []
 
     for start in range(0, len(reader.pages), chunk_size):
@@ -270,31 +278,57 @@ async def extract_with_gemini_adaptive(
     pdf_bytes: bytes,
     chunk_size: int = GEMINI_PAGE_CHUNK_SIZE,
 ) -> list[TimesheetRow]:
+    if not is_gemini_configured():
+        return []
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+
     try:
-        page_count = len(pypdf.PdfReader(BytesIO(pdf_bytes)).pages)
+        reader = pypdf.PdfReader(BytesIO(pdf_bytes))
+        page_count = len(reader.pages)
     except Exception:
         return await extract_with_gemini(pdf_bytes)
 
     if page_count <= chunk_size:
         return await extract_with_gemini(pdf_bytes)
 
+    semaphore = asyncio.Semaphore(GEMINI_MAX_CONCURRENT_CHUNKS)
+
+    async def extract_chunk(
+        chunk: bytes, client: httpx.AsyncClient
+    ) -> tuple[list[TimesheetRow], GeminiExtractionError | None]:
+        async with semaphore:
+            try:
+                return await extract_with_gemini(chunk, client=client), None
+            except GeminiExtractionError as error:
+                last_error = error
+                logger.warning("Gemini chunk failed; retrying as single pages: %s", error)
+
+            page_chunks = await asyncio.to_thread(_split_pdf_into_chunks, chunk, 1)
+            chunk_rows: list[TimesheetRow] = []
+            for page_chunk in page_chunks:
+                try:
+                    chunk_rows.extend(await extract_with_gemini(page_chunk, client=client))
+                except GeminiExtractionError as error:
+                    last_error = error
+                    logger.warning("Gemini single-page fallback failed: %s", error)
+            return chunk_rows, last_error
+
+    chunks = await asyncio.to_thread(_split_pdf_into_chunks, pdf_bytes, chunk_size, reader=reader)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS)) as client:
+        results = await asyncio.gather(
+            *(extract_chunk(chunk, client) for chunk in chunks),
+            return_exceptions=True,
+        )
     rows: list[TimesheetRow] = []
     last_error: GeminiExtractionError | None = None
-
-    for chunk in _split_pdf_into_chunks(pdf_bytes, chunk_size):
-        try:
-            rows.extend(await extract_with_gemini(chunk))
-            continue
-        except GeminiExtractionError as e:
-            last_error = e
-            logger.warning("Gemini chunk failed; retrying as single pages: %s", e)
-
-        for page_chunk in _split_pdf_into_chunks(chunk, 1):
-            try:
-                rows.extend(await extract_with_gemini(page_chunk))
-            except GeminiExtractionError as e:
-                last_error = e
-                logger.warning("Gemini single-page fallback failed: %s", e)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        chunk_rows, chunk_error = result
+        rows.extend(chunk_rows)
+        if chunk_error is not None:
+            last_error = chunk_error
 
     if rows:
         return rows

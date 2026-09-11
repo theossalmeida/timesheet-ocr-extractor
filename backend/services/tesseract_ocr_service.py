@@ -119,13 +119,16 @@ def _render_pdf_pages(pdf_bytes: bytes, dpi: int = TESSERACT_DPI, page_indices=N
     `pip install PyMuPDF pytesseract Pillow` + installing the Tesseract-OCR
     binary itself.
     """
-    import fitz  # PyMuPDF
+    return [image for _, image in _iter_pdf_page_images(pdf_bytes, dpi, page_indices)]
+
+
+def _iter_pdf_page_images(pdf_bytes: bytes, dpi: int = TESSERACT_DPI, page_indices=None):
+    import fitz
     from PIL import Image
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     zoom = dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    images = []
     try:
         wanted = range(len(doc)) if page_indices is None else page_indices
         for page_index in wanted:
@@ -134,13 +137,14 @@ def _render_pdf_pages(pdf_bytes: bytes, dpi: int = TESSERACT_DPI, page_indices=N
             page = doc.load_page(page_index)
             pix = page.get_pixmap(matrix=matrix)
             image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            images.append(image)
+            yield page_index + 1, image
     finally:
         doc.close()
-    return images
 
 
-def ocr_pdf_page_texts(pdf_bytes: bytes) -> list[tuple[int, str]]:
+def ocr_pdf_page_texts(
+    pdf_bytes: bytes, page_numbers: Iterable[int] | None = None
+) -> list[tuple[int, str]]:
     """OCR every page of a PDF and return (1-based page index, text) tuples.
 
     The output shape matches what `pypdf`/`pdfplumber` extraction produces
@@ -159,15 +163,21 @@ def ocr_pdf_page_texts(pdf_bytes: bytes) -> list[tuple[int, str]]:
     import pytesseract
 
     lang = _pick_languages()
-    images = _render_pdf_pages(pdf_bytes)
+    page_indices = None if page_numbers is None else sorted({number - 1 for number in page_numbers})
+    images = _iter_pdf_page_images(pdf_bytes, page_indices=page_indices)
     page_texts: list[tuple[int, str]] = []
-    for page_index, image in enumerate(images, start=1):
-        try:
-            text = pytesseract.image_to_string(image, lang=lang, config=TESSERACT_CONFIG)
-        except pytesseract.TesseractError as e:
-            logger.warning("Tesseract OCR failed on page %d: %s", page_index, e)
-            text = ""
-        page_texts.append((page_index, _normalize_ocr_text(text)))
+    try:
+        for page_index, image in images:
+            try:
+                text = pytesseract.image_to_string(image, lang=lang, config=TESSERACT_CONFIG)
+            except pytesseract.TesseractError as e:
+                logger.warning("Tesseract OCR failed on page %d: %s", page_index, e)
+                text = ""
+            finally:
+                image.close()
+            page_texts.append((page_index, _normalize_ocr_text(text)))
+    finally:
+        images.close()
     return page_texts
 
 
@@ -196,8 +206,9 @@ def extract_frequency_day_texts_for_pages(
     re-rendering the whole document.
     """
     wanted = set(page_numbers)
-    all_texts = ocr_pdf_page_texts(pdf_bytes)
-    return [(idx, text) for idx, text in all_texts if idx in wanted]
+    if not wanted:
+        return []
+    return ocr_pdf_page_texts(pdf_bytes, page_numbers=wanted)
 
 
 def extract_timesheet_rows_tesseract(pdf_bytes: bytes) -> list:

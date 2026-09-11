@@ -152,7 +152,7 @@ def test_adaptive_extract_chunks_large_pdf_before_gemini():
     ):
         result = asyncio.run(extract_with_gemini_adaptive(b"full-pdf", chunk_size=5))
 
-    split_mock.assert_called_once_with(b"full-pdf", 5)
+    split_mock.assert_called_once_with(b"full-pdf", 5, reader=reader)
     assert gemini_mock.await_args_list[0].args == (b"chunk-1",)
     assert gemini_mock.await_args_list[1].args == (b"chunk-2",)
     assert result == rows
@@ -221,3 +221,123 @@ def test_gemini_url_uses_configured_model(monkeypatch):
     monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-custom")
 
     assert _gemini_url().endswith("/models/gemini-custom:generateContent")
+
+@pytest.mark.asyncio
+async def test_adaptive_chunks_overlap_with_bounded_concurrency_and_ordered_rows(monkeypatch):
+    from services import ai_usage, gemini_service as service
+
+    chunks = [bytes([index]) for index in range(7)]
+    reader = MagicMock()
+    reader.pages = [object()] * 14
+    active = 0
+    peak_active = 0
+    completed = []
+
+    async def extract(chunk, *, client=None):
+        nonlocal active, peak_active
+        index = chunk[0]
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.002 * (7 - index))
+        ai_usage.record("gemini", "test-model", "extract", {"total_tokens": index + 1})
+        completed.append(index)
+        active -= 1
+        return [TimesheetRow(data=f"{index + 1:02d}/03/2024", marcacoes=["08:00"])]
+
+    monkeypatch.setattr(service.pypdf, "PdfReader", lambda _: reader)
+    monkeypatch.setattr(service, "_split_pdf_into_chunks", lambda *args, **kwargs: chunks)
+    monkeypatch.setattr(service, "extract_with_gemini", extract)
+
+    with ai_usage.recording() as calls:
+        rows = await service.extract_with_gemini_adaptive(b"pdf")
+
+    assert peak_active == service.GEMINI_MAX_CONCURRENT_CHUNKS
+    assert completed != list(range(7))
+    assert [row.data for row in rows] == [f"{index + 1:02d}/03/2024" for index in range(7)]
+    assert len(calls) == 7
+    assert sum(call["total_tokens"] for call in calls) == 28
+
+
+@pytest.mark.asyncio
+async def test_adaptive_waits_for_started_calls_before_propagating_unexpected_error(monkeypatch):
+    from services import ai_usage, gemini_service as service
+
+    reader = MagicMock()
+    reader.pages = [object()] * 4
+    completed = asyncio.Event()
+
+    async def extract(chunk, *, client=None):
+        if chunk == b"bad":
+            raise ValueError("invalid response")
+        await asyncio.sleep(0.01)
+        ai_usage.record("gemini", "test-model", "extract", {"total_tokens": 9})
+        completed.set()
+        return []
+
+    monkeypatch.setattr(service.pypdf, "PdfReader", lambda _: reader)
+    monkeypatch.setattr(service, "_split_pdf_into_chunks", lambda *args, **kwargs: [b"bad", b"good"])
+    monkeypatch.setattr(service, "extract_with_gemini", extract)
+
+    with ai_usage.recording() as calls:
+        with pytest.raises(ValueError, match="invalid response"):
+            await service.extract_with_gemini_adaptive(b"pdf")
+        assert completed.is_set()
+        assert len(calls) == 1
+
+
+def test_adaptive_reads_source_pdf_once():
+    from io import BytesIO
+    import pypdf
+    from services import gemini_service as service
+
+    writer = pypdf.PdfWriter()
+    for _ in range(5):
+        writer.add_blank_page(width=72, height=72)
+    output = BytesIO()
+    writer.write(output)
+
+    with (
+        patch.object(service.pypdf, "PdfReader", wraps=pypdf.PdfReader) as reader,
+        patch.object(service, "extract_with_gemini", AsyncMock(return_value=[])) as extract,
+    ):
+        assert asyncio.run(service.extract_with_gemini_adaptive(output.getvalue())) == []
+
+    assert reader.call_count == 1
+    assert extract.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_adaptive_concurrent_fallback_preserves_partial_rows_and_page_order(monkeypatch):
+    from services import gemini_service as service
+
+    reader = MagicMock()
+    reader.pages = [object()] * 6
+    chunks = {
+        b"pdf": [b"first", b"second", b"third"],
+        b"first": [b"page-1", b"page-2"],
+        b"third": [b"page-5", b"page-6"],
+    }
+    responses = {
+        b"first": GeminiExtractionError("first chunk failed"),
+        b"page-1": [TimesheetRow(data="01/03/2024", marcacoes=["08:00"])],
+        b"page-2": GeminiExtractionError("unreadable page"),
+        b"second": [TimesheetRow(data="03/03/2024", marcacoes=["08:00"])],
+        b"third": GeminiExtractionError("third chunk failed"),
+        b"page-5": GeminiExtractionError("unreadable page"),
+        b"page-6": [TimesheetRow(data="06/03/2024", marcacoes=["08:00"])],
+    }
+
+    async def extract(chunk, *, client=None):
+        await asyncio.sleep(0)
+        result = responses[chunk]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(service.pypdf, "PdfReader", lambda _: reader)
+    monkeypatch.setattr(service, "_split_pdf_into_chunks", lambda pdf, *args, **kwargs: chunks[pdf])
+    monkeypatch.setattr(service, "extract_with_gemini", extract)
+
+    rows = await service.extract_with_gemini_adaptive(b"pdf")
+
+    assert [row.data for row in rows] == ["01/03/2024", "03/03/2024", "06/03/2024"]

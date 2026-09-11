@@ -56,9 +56,28 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
   const upload = await api<{ id: string; chunk_size: number }>("/uploads", "POST", { filename: file.name, mode, size_bytes: file.size }, teamId);
   let jobId = "";
   try {
-    for (let offset = 0, part = 0; offset < file.size; offset += upload.chunk_size, part++) {
-      await retryUploadRequest(`/uploads/${upload.id}/${part}`, { method: "PUT", body: file.slice(offset, offset + upload.chunk_size), headers: { "content-type": "application/octet-stream" } }, teamId);
-      onProgress("Enviando arquivo…", Math.round(Math.min(offset + upload.chunk_size, file.size) / file.size * 15));
+    const partCount = Math.ceil(file.size / upload.chunk_size);
+    let nextPart = 0;
+    let uploadedBytes = 0;
+    let failed = false;
+    const uploadParts = async () => {
+      while (!failed && nextPart < partCount) {
+        const part = nextPart++;
+        const offset = part * upload.chunk_size;
+        const body = file.slice(offset, offset + upload.chunk_size);
+        try {
+          await retryUploadRequest(`/uploads/${upload.id}/${part}`, { method: "PUT", body, headers: { "content-type": "application/octet-stream" } }, teamId);
+          uploadedBytes += body.size;
+          onProgress("Enviando arquivo…", Math.round(uploadedBytes / file.size * 15));
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    };
+    const results = await Promise.allSettled(Array.from({ length: Math.min(3, partCount) }, uploadParts));
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
     }
     const job: { id: string } = await (await retryUploadRequest(`/uploads/${upload.id}/process`, { method: "POST" }, teamId)).json();
     jobId = job.id;
@@ -68,13 +87,13 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
   }
   let failures = 0;
   while (true) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
     let result: { status: string; error: string; artifacts: Artifact[]; progress: { message?: string; chunk?: number; total?: number } };
     try { result = await api(`/documents/${jobId}`, "GET", undefined, teamId); failures = 0; }
-    catch (error) { if (++failures >= 5) throw error; onProgress("Reconectando… Seu documento continua no histórico.", 15); continue; }
+    catch (error) { if (++failures >= 5) throw error; onProgress("Reconectando… Seu documento continua no histórico.", 15); await new Promise(resolve => setTimeout(resolve, 2000)); continue; }
     if (result.status === "done") return result.artifacts;
     if (result.status !== "processing") throw new Error(result.error ?? "Processamento interrompido. Confira o histórico.");
     const value = result.progress;
     onProgress(value.message ?? "Processando documento…", value.total ? 15 + Math.min(80, Math.round((value.chunk ?? 0) / value.total * 80)) : 15);
+    await new Promise(resolve => setTimeout(resolve, 2000));
   }
 }

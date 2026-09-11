@@ -86,3 +86,76 @@ Data Dia Linha Carro Viag Lcto Peg Larq Prest Cont Trab
     assert rows[1].ocorrencia_tipo == "folga"
     assert rows[2].data == "16/03/2026"
     assert rows[2].marcacoes == ["04:25", "10:20", "14:15", "16:05"]
+
+
+def test_selected_page_ocr_renders_only_requested_pages_and_preserves_numbers():
+    import fitz
+    from services.tesseract_ocr_service import extract_frequency_day_texts_for_pages
+
+    with fitz.open() as doc:
+        for _ in range(4):
+            doc.new_page(width=72, height=72)
+        pdf_bytes = doc.tobytes()
+
+    rendered_pages = []
+    with (
+        patch("services.tesseract_ocr_service.is_tesseract_available", return_value=True),
+        patch("services.tesseract_ocr_service._pick_languages", return_value="eng"),
+        patch("pytesseract.image_to_string", side_effect=["second", "fourth"]) as ocr,
+        patch("fitz.Page.get_pixmap", autospec=True) as render,
+    ):
+        from unittest.mock import MagicMock
+        pixmap = MagicMock(width=1, height=1, samples=b"\xff\xff\xff")
+        render.side_effect = lambda page, **kwargs: rendered_pages.append(page.number) or pixmap
+        result = extract_frequency_day_texts_for_pages(pdf_bytes, [4, 2, 2, 0, 8])
+
+    assert result == [(2, "second"), (4, "fourth")]
+    assert ocr.call_count == 2
+    assert rendered_pages == [1, 3]
+
+
+def test_ocr_releases_each_image_before_rendering_next_page():
+    from unittest.mock import MagicMock
+    from services.tesseract_ocr_service import ocr_pdf_page_texts
+
+    first = MagicMock()
+    second = MagicMock()
+
+    def render_pages(*args, **kwargs):
+        yield 1, first
+        first.close.assert_called_once()
+        yield 2, second
+
+    with (
+        patch("services.tesseract_ocr_service.is_tesseract_available", return_value=True),
+        patch("services.tesseract_ocr_service._pick_languages", return_value="eng"),
+        patch("services.tesseract_ocr_service._iter_pdf_page_images", side_effect=render_pages),
+        patch("pytesseract.image_to_string", side_effect=["first", "second"]),
+    ):
+        assert ocr_pdf_page_texts(b"fake") == [(1, "first"), (2, "second")]
+
+    second.close.assert_called_once()
+
+
+def test_ocr_continues_after_page_error_and_closes_images():
+    import pytesseract
+    from unittest.mock import MagicMock
+    from services.tesseract_ocr_service import ocr_pdf_page_texts
+
+    first = MagicMock()
+    second = MagicMock()
+
+    def render_pages(*args, **kwargs):
+        yield 1, first
+        yield 2, second
+
+    with (
+        patch("services.tesseract_ocr_service.is_tesseract_available", return_value=True),
+        patch("services.tesseract_ocr_service._pick_languages", return_value="eng"),
+        patch("services.tesseract_ocr_service._iter_pdf_page_images", side_effect=render_pages),
+        patch("pytesseract.image_to_string", side_effect=[pytesseract.TesseractError(1, "failed"), "second"]),
+    ):
+        assert ocr_pdf_page_texts(b"fake") == [(1, ""), (2, "second")]
+
+    first.close.assert_called_once()
+    second.close.assert_called_once()
