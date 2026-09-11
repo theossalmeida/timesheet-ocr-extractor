@@ -17,7 +17,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 GOOGLE_CLOUD_SKUS_URL = "https://cloudbilling.googleapis.com/v1/services/{service_id}/skus"
-GOOGLE_CLOUD_SERVICE_ID = "2A08-2A2D-BEF9"
+GOOGLE_CLOUD_SERVICE_ID = "C7E2-9256-1C43"
 FX_TTL_SECONDS = 24 * 3600
 FX_TIMEOUT_SECONDS = 5.0
 # Sanity band for a USD/BRL quote. A malformed or misread response (0, 1.0,
