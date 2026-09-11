@@ -154,3 +154,59 @@ def test_duplicate_detection_is_scoped_to_team_and_mode(owner):
         assert owner.put(f'/uploads/{upload}/0',content=pdf,headers={'x-team-id':other_team}).status_code == 200
         other_team_id = owner.post(f'/uploads/{upload}/process',headers={'x-team-id':other_team}).json()['id']
     assert other_team_id != original_id  # another team's identical file is not the same document
+
+
+def test_reuploads_rejoin_running_job_even_when_queue_is_full(owner):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from documents import content_hash, find_duplicate
+
+    app.state.limiter._limiter.storage.reset()
+    pdf = b'%PDF refresh while processing'
+    release = Event()
+    started = Event()
+    calls = []
+    client = TestClient(app, headers=dict(owner.headers), cookies=owner.cookies)
+
+    async def stream(*args):
+        calls.append(args)
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(.01)
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKrefresh').decode(),'excel_filename':'r.xlsx','provider':'pdfplumber'})+'\n\n'
+
+    def upload_file(filename, content=pdf):
+        result = client.post('/uploads', json={'filename':filename,'mode':'guia','size_bytes':len(content)})
+        assert result.status_code == 200, result.text
+        upload_id = result.json()['id']
+        assert client.put(f'/uploads/{upload_id}/0', content=content).status_code == 200
+        return upload_id
+
+    with patch('main.initialize'), patch('main.pool.close'), client, patch('main.stream_guia_extraction', stream):
+        try:
+            original_upload = upload_file('original.pdf')
+            original_id = client.post(f'/uploads/{original_upload}/process').json()['id']
+            assert started.wait(5)
+            repeated_uploads = [upload_file('renamed.pdf'), upload_file('original.pdf')]
+            with patch('jobs.jobs', {object(), object()}), ThreadPoolExecutor(max_workers=2) as executor:
+                responses = list(executor.map(lambda upload_id: client.post(f'/uploads/{upload_id}/process'), repeated_uploads))
+                assert all(response.status_code == 200 for response in responses)
+                assert [response.json()['id'] for response in responses] == [original_id, original_id]
+                changed_upload = upload_file('original.pdf', b'%PDF changed content')
+                assert client.post(f'/uploads/{changed_upload}/process').status_code == 429
+                assert client.delete(f'/uploads/{changed_upload}').status_code == 200
+            assert client.get('/documents/'+original_id).json()['status'] == 'processing'
+            with pool.connection() as conn:
+                assert conn.execute('SELECT count(*) AS n FROM upload_parts WHERE upload_id=ANY(%s::uuid[])', (repeated_uploads,)).fetchone()['n'] == 0
+                assert conn.execute('SELECT count(*) AS n FROM extractions WHERE content_hash=%s', (content_hash(pdf),)).fetchone()['n'] == 1
+                assert find_duplicate(conn, owner.headers['x-team-id'], 'cartao', content_hash(pdf), include_processing=True) is None
+        finally:
+            release.set()
+        for _ in range(50):
+            status = client.get('/documents/'+original_id).json()
+            if status['status'] != 'processing':
+                break
+            time.sleep(.1)
+        assert status['status'] == 'done', status
+    assert len(calls) == 1

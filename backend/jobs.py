@@ -88,7 +88,7 @@ def discard_upload(upload_id: UUID, request: Request):
     return {'ok':True}
 
 
-def prepare_job(upload_id, request):
+def prepare_job(upload_id, request, can_start=True):
     with pool.connection() as conn:
         upload = owned_upload(conn,upload_id,request)
         if upload['extraction_id']:
@@ -100,19 +100,18 @@ def prepare_job(upload_id, request):
         if len(content)!=upload['size_bytes']:
             raise HTTPException(400,'Tamanho do upload inválido.')
 
-        # A byte-identical document already has a result: point this upload at
-        # it instead of storing the PDF again, reprocessing it, or billing a
-        # second Gemini call for it. Matched on content, not the upload's
-        # filename, which gets reused across unrelated documents.
         digest = content_hash(content)
-        duplicate = find_duplicate(conn,upload['team_id'],upload['mode'],digest)
+        duplicate = find_duplicate(conn,upload['team_id'],upload['mode'],digest,include_processing=True)
         if duplicate:
             extraction, _ = duplicate
             conn.execute("UPDATE uploads SET extraction_id=%s WHERE id=%s", (extraction['id'],upload_id))
             conn.execute("DELETE FROM upload_parts WHERE upload_id=%s", (upload_id,))
             _discard_upload_parts(parts)
-            logger.info('Upload %s reused extraction %s (identical %s already processed)',upload_id,extraction['id'],upload['mode'])
+            logger.info('Upload %s reused extraction %s (mode=%s status=%s)',upload_id,extraction['id'],upload['mode'],extraction['status'])
             return extraction['id'],None,None
+
+        if not can_start:
+            raise HTTPException(429,'O servidor está processando outros documentos. Tente novamente em instantes.')
 
         extraction_id = uuid4()
         key = storage.object_key('raw_files',upload['team_id'],extraction_id,'original.pdf')
@@ -166,16 +165,7 @@ async def run_job(extraction_id, upload, content):
 @router.post('/uploads/{upload_id}/process')
 async def process_upload(upload_id: UUID, request: Request):
     async with job_start_lock:
-        def existing_extraction():
-            with pool.connection() as conn:
-                return owned_upload(conn,upload_id,request)['extraction_id']
-
-        existing_id = await asyncio.to_thread(existing_extraction)
-        if existing_id:
-            return {'id':existing_id}
-        if len(jobs)>=2:
-            raise HTTPException(429,'O servidor está processando outros documentos. Tente novamente em instantes.')
-        extraction_id,upload,content = await asyncio.to_thread(prepare_job,upload_id,request)
+        extraction_id,upload,content = await asyncio.to_thread(prepare_job,upload_id,request,len(jobs)<2)
         if upload:
             task = asyncio.create_task(run_job(extraction_id,upload,content))
             jobs.add(task)

@@ -30,20 +30,15 @@ def content_hash(content):
     return hashlib.sha256(content).hexdigest()
 
 
-def find_duplicate(conn, team_id, mode, digest):
-    """The most recent 'done' extraction with identical bytes and mode, if any.
-
-    Matched on content, not filename: a filename like "504.pdf" gets reused
-    across unrelated documents (a different month, a different driver), so
-    only a byte-identical resubmission - a retry, an accidental second upload -
-    should ever be treated as the same document. Returns None unless that
-    extraction still has its output artifacts to hand back.
-    """
+def find_duplicate(conn, team_id, mode, digest, include_processing=False):
     if not digest:
         return None
-    row = conn.execute("SELECT id,provider,row_count,cost_brl FROM extractions WHERE team_id=%s AND mode=%s AND content_hash=%s AND status='done' ORDER BY created_at DESC LIMIT 1", (team_id,mode,digest)).fetchone()
+    statuses = ['processing', 'done'] if include_processing else ['done']
+    row = conn.execute("SELECT id,status,provider,row_count,cost_brl FROM extractions WHERE team_id=%s AND mode=%s AND content_hash=%s AND status=ANY(%s) ORDER BY created_at DESC LIMIT 1", (team_id,mode,digest,statuses)).fetchone()
     if not row:
         return None
+    if row['status'] == 'processing':
+        return row, []
     artifacts = conn.execute("SELECT id,kind,filename,size_bytes FROM artifacts WHERE extraction_id=%s AND kind!='original'", (row['id'],)).fetchall()
     if not artifacts:
         return None
