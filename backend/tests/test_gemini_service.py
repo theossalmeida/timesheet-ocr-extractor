@@ -33,7 +33,7 @@ def configure_gemini(monkeypatch):
     from services import gemini_service as service
 
     monkeypatch.setattr(service.settings, "GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-3.1-pro-preview")
+    monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-3.8-flash")
 
 
 def _mock_error_response(status: int, text: str = "error") -> MagicMock:

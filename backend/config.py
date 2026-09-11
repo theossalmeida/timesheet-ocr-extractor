@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # (services/ai_usage.py, services/ai_pricing.py), so the model name must
     # match one litellm knows a price for.
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.1-pro-preview"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
     MISTRAL_API_KEY: str = ""
     # Fallback USD/BRL rate used to price AI usage when the daily quote cannot
     # be fetched (services/fx.py). 0 means "no fallback": costs are then

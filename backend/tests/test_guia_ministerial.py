@@ -305,7 +305,7 @@ async def test_stream_meters_gemini_and_reports_it_as_the_provider():
     from services import ai_usage
 
     async def fake_gemini(chunk_bytes):
-        ai_usage.record("gemini", "gemini-3.1-pro-preview", "extract",
+        ai_usage.record("gemini", "gemini-3.8-flash", "extract",
                         {"prompt_tokens": 1000, "cached_tokens": 0, "output_tokens": 500,
                          "thought_tokens": 0, "total_tokens": 1500})
         return [_guia_record()]

@@ -14,7 +14,7 @@ from services.gemini_service import (
     extract_with_gemini_adaptive,
 )
 
-MODEL = 'gemini-3.1-pro-preview'
+MODEL = 'gemini-3.8-flash'
 # Published rates for the model above, per token (litellm's price map).
 INPUT_USD = 2e-06
 OUTPUT_USD = 1.2e-05

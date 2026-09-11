@@ -29,7 +29,7 @@ def is_gemini_configured() -> bool:
 
 
 def _gemini_model() -> str:
-    return (settings.GEMINI_MODEL or "gemini-3.1-pro-preview").strip()
+    return (settings.GEMINI_MODEL or "gemini-3.8-flash").strip()
 
 
 def _gemini_url() -> str:

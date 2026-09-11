@@ -64,7 +64,7 @@ def _done_event(ai_usage):
 
 
 def _call(**overrides):
-    return {'provider':'gemini','model':'gemini-3.1-pro-preview','kind':'extract','metered':True,'prompt_tokens':1000,'cached_tokens':0,'output_tokens':500,'thought_tokens':100,'total_tokens':1600,**overrides}
+    return {'provider':'gemini','model':'gemini-3.8-flash','kind':'extract','metered':True,'prompt_tokens':1000,'cached_tokens':0,'output_tokens':500,'thought_tokens':100,'total_tokens':1600,**overrides}
 
 
 def test_gemini_document_costs_the_sum_of_its_calls(owner, monkeypatch):
