@@ -213,7 +213,7 @@ async def extract_with_gemini(
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "low"},
             "maxOutputTokens": 8192,
         },
     }
@@ -348,7 +348,7 @@ async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "low"},
             "maxOutputTokens": 8192,
         },
     }
