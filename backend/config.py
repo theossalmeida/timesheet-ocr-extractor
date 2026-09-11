@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.8-flash"
     MISTRAL_API_KEY: str = ""
+    GOOGLE_CLOUD_API_KEY: str = ""
     # Fallback USD/BRL rate used to price AI usage when the daily quote cannot
     # be fetched (services/fx.py). 0 means "no fallback": costs are then
     # recorded in USD only and reported as unknown in reais.

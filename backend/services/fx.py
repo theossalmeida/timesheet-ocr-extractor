@@ -16,7 +16,8 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-FX_URL = "https://economia.awesomeapi.com.br/last/USD-BRL"
+GOOGLE_CLOUD_SKUS_URL = "https://cloudbilling.googleapis.com/v1/services/{service_id}/skus"
+GOOGLE_CLOUD_SERVICE_ID = "2A08-2A2D-BEF9"
 FX_TTL_SECONDS = 24 * 3600
 FX_TIMEOUT_SECONDS = 5.0
 # Sanity band for a USD/BRL quote. A malformed or misread response (0, 1.0,
@@ -29,9 +30,16 @@ _cache: dict = {"rate": None, "fetched_at": 0.0}
 
 
 def _fetch_usd_brl() -> float:
-    response = httpx.get(FX_URL, timeout=FX_TIMEOUT_SECONDS)
+    api_key = settings.GOOGLE_CLOUD_API_KEY.strip()
+    if not api_key:
+        raise ValueError("GOOGLE_CLOUD_API_KEY is not configured")
+    response = httpx.get(
+        GOOGLE_CLOUD_SKUS_URL.format(service_id=GOOGLE_CLOUD_SERVICE_ID),
+        params={"currencyCode": "BRL", "pageSize": 1, "key": api_key},
+        timeout=FX_TIMEOUT_SECONDS,
+    )
     response.raise_for_status()
-    rate = float(response.json()["USDBRL"]["bid"])
+    rate = float(response.json()["skus"][0]["pricingInfo"][0]["currencyConversionRate"])
     if not FX_MIN_RATE <= rate <= FX_MAX_RATE:
         raise ValueError(f"USD-BRL rate out of range: {rate}")
     return rate
