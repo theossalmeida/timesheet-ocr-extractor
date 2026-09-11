@@ -173,3 +173,29 @@ def test_local_only_document_costs_zero_even_for_an_ai_named_provider(owner):
 
     document = owner.get('/documents',params={'q':'sem-chamada.pdf'}).json()['documents'][0]
     assert float(document['cost_brl']) == 0
+
+
+def test_reprice_repairs_usd_and_brl_only_rows_and_sums_file(owner, monkeypatch):
+    from scripts.reprice_ai_usage import reprice_missing
+
+    app.state.limiter._limiter.storage.reset()
+    monkeypatch.setattr('services.fx.usd_brl', lambda: 5.0)
+
+    async def stream(*args):
+        yield _done_event([_call(), _call(prompt_tokens=2000)])
+
+    with patch('main.stream_timesheet_extraction', stream):
+        response = owner.post('/extract/stream', files={'file': ('repair.pdf', b'%PDF repair', 'application/pdf')})
+    extraction_id = json.loads(response.text.split('data: ')[-1])['extraction_id']
+    with pool.connection() as conn:
+        conn.execute('UPDATE ai_usage SET input_usd=NULL,output_usd=NULL,cost_usd=NULL,cost_brl=NULL WHERE extraction_id=%s AND prompt_tokens=1000', (extraction_id,))
+        conn.execute('UPDATE ai_usage SET cost_brl=NULL WHERE extraction_id=%s AND prompt_tokens=2000', (extraction_id,))
+        conn.execute('UPDATE extractions SET cost_brl=NULL WHERE id=%s', (extraction_id,))
+        reprice_missing(conn, 6.0)
+        rows = conn.execute('SELECT cost_usd,cost_brl,usd_brl_rate FROM ai_usage WHERE extraction_id=%s ORDER BY prompt_tokens', (extraction_id,)).fetchall()
+        assert [float(row['cost_usd']) for row in rows] == pytest.approx([0.008, 0.010])
+        assert [float(row['usd_brl_rate']) for row in rows] == [5.0, 5.0]
+        total = conn.execute('SELECT cost_brl FROM extractions WHERE id=%s', (extraction_id,)).fetchone()['cost_brl']
+        assert float(total) == pytest.approx(0.09)
+        reprice_missing(conn, 7.0)
+        assert conn.execute('SELECT cost_brl FROM extractions WHERE id=%s', (extraction_id,)).fetchone()['cost_brl'] == total

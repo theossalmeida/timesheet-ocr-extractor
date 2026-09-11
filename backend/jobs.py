@@ -79,7 +79,9 @@ async def upload_part(upload_id: UUID, part: int, request: Request):
 @router.delete('/uploads/{upload_id}')
 def discard_upload(upload_id: UUID, request: Request):
     with pool.connection() as conn:
-        owned_upload(conn,upload_id,request)
+        upload = owned_upload(conn,upload_id,request)
+        if upload['extraction_id']:
+            return {'ok':True}
         for part in conn.execute('SELECT object_key FROM upload_parts WHERE upload_id=%s',(upload_id,)).fetchall():
             if part['object_key']: storage.delete(part['object_key'])
         conn.execute("DELETE FROM uploads WHERE id=%s", (upload_id,))
@@ -164,6 +166,13 @@ async def run_job(extraction_id, upload, content):
 @router.post('/uploads/{upload_id}/process')
 async def process_upload(upload_id: UUID, request: Request):
     async with job_start_lock:
+        def existing_extraction():
+            with pool.connection() as conn:
+                return owned_upload(conn,upload_id,request)['extraction_id']
+
+        existing_id = await asyncio.to_thread(existing_extraction)
+        if existing_id:
+            return {'id':existing_id}
         if len(jobs)>=2:
             raise HTTPException(429,'O servidor está processando outros documentos. Tente novamente em instantes.')
         extraction_id,upload,content = await asyncio.to_thread(prepare_job,upload_id,request)

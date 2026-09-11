@@ -68,6 +68,11 @@ class GeminiExtractionError(Exception):
     pass
 
 
+def _record_uncertain_request(error: httpx.RequestError, kind: str) -> None:
+    if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
+        ai_usage.record('gemini', _gemini_model(), kind, None)
+
+
 def _clean_json(text: str) -> str:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -219,6 +224,7 @@ async def extract_with_gemini(pdf_bytes: bytes) -> list[TimesheetRow]:
                 )
             break
         except (httpx.TimeoutException, httpx.RequestError) as e:
+            _record_uncertain_request(e, 'extract')
             if attempt >= GEMINI_RETRIES:
                 raise GeminiExtractionError(
                     f"Gemini request failed after {attempt} attempt(s): {e}"
@@ -312,12 +318,16 @@ async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
             "maxOutputTokens": 8192,
         },
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        response = await client.post(
-            _gemini_url(),
-            params={"key": settings.GEMINI_API_KEY},
-            json=body,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            response = await client.post(
+                _gemini_url(),
+                params={"key": settings.GEMINI_API_KEY},
+                json=body,
+            )
+    except httpx.RequestError as error:
+        _record_uncertain_request(error, 'normalize')
+        raise
     if response.status_code != 200:
         logger.error(
             "Gemini normalization error - status=%d body=%s",

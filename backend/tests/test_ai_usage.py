@@ -133,16 +133,18 @@ def test_failed_extraction_still_records_usage():
     assert calls[0]['metered'] is True
 
 
-def test_transport_failure_records_nothing():
+@pytest.mark.parametrize('error, expected_calls', [(httpx.ReadTimeout('slow'), 2), (httpx.ConnectTimeout('unreachable'), 0)])
+def test_transport_failure_records_uncertain_requests(error, expected_calls):
     client = _client()
-    client.post = AsyncMock(side_effect=httpx.ReadTimeout('slow'))
+    client.post = AsyncMock(side_effect=error)
 
     with patch('httpx.AsyncClient', return_value=client), patch('services.gemini_service.asyncio.sleep', AsyncMock()):
         with ai_usage.recording() as calls:
             with pytest.raises(GeminiExtractionError):
                 asyncio.run(extract_with_gemini(b'fake pdf'))
 
-    assert calls == []
+    assert len(calls) == expected_calls
+    assert all(not call['metered'] for call in calls)
 
 
 def test_recording_is_scoped_to_the_block():
@@ -204,3 +206,29 @@ def test_no_exchange_rate_keeps_usd_and_drops_brl(monkeypatch):
 
     assert priced['cost_usd'] > 0
     assert priced['cost_brl'] is None
+
+
+def test_pricing_does_not_import_litellm_runtime(monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def reject_litellm(name, *args, **kwargs):
+        if name == 'litellm' or name.startswith('litellm.'):
+            raise ImportError('Runtime unavailable')
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', reject_litellm)
+    ai_pricing.model_prices.cache_clear()
+    call = {'provider': 'gemini', 'model': MODEL, 'metered': True, 'prompt_tokens': 1000, 'output_tokens': 500}
+    assert ai_pricing.usd_cost(call) == pytest.approx((0.002, 0.006))
+
+
+def test_exactly_200k_uses_standard_rates():
+    call = {'provider': 'gemini', 'model': MODEL, 'metered': True, 'prompt_tokens': 200_000, 'cached_tokens': 100_000, 'output_tokens': 1000}
+    assert ai_pricing.usd_cost(call) == pytest.approx((0.22, 0.012))
+
+
+def test_long_prompt_cached_tokens_use_higher_tier():
+    call = {'provider': 'gemini', 'model': MODEL, 'metered': True, 'prompt_tokens': 300_000, 'cached_tokens': 100_000, 'output_tokens': 1000}
+    assert ai_pricing.usd_cost(call) == pytest.approx((0.84, 0.018))

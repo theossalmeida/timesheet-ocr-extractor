@@ -43,7 +43,11 @@ def test_background_job_survives_logout(owner):
             result = client.post(f'/uploads/{upload}/process')
             assert result.status_code == 200,result.text
             job_id = result.json()['id']
-            assert client.post(f'/uploads/{upload}/process').json()['id'] == job_id
+            with patch('jobs.jobs', {object(), object()}):
+                assert client.post(f'/uploads/{upload}/process').json()['id'] == job_id
+            assert client.delete('/uploads/'+upload).status_code == 200
+            with pool.connection() as conn:
+                assert str(conn.execute('SELECT extraction_id FROM uploads WHERE id=%s', (upload,)).fetchone()['extraction_id']) == job_id
             assert client.post('/auth/logout').status_code == 200
             assert client.post('/auth/login',json={'email':'owner@example.com','password':'a long secure password'}).status_code == 200
             owner.cookies.update(client.cookies)

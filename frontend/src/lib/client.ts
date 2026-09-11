@@ -4,6 +4,12 @@ export interface Artifact { id: string; kind: "original" | "excel" | "csv"; file
 export interface DocumentEntry { id: string; filename: string; mode: string; status: string; provider: string | null; row_count: number | null; cost_brl: number | null; created_at: string; user_name: string; artifacts: Artifact[] }
 export interface History { documents: DocumentEntry[]; has_more: boolean; summary: { documents: number; known_cost_brl: number; unknown_costs: number } }
 
+export class RequestError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+  }
+}
+
 export async function request(path: string, options: RequestInit = {}, teamId?: string): Promise<Response> {
   const headers = new Headers(options.headers);
   headers.set("x-autus-request", "1");
@@ -13,9 +19,21 @@ export async function request(path: string, options: RequestInit = {}, teamId?: 
     const body = await response.json().catch(() => null);
     const message = typeof body?.error === "string" ? body.error : typeof body?.detail === "string" ? body.detail : response.status === 422 ? "Confira os campos preenchidos." : "Não foi possível concluir a solicitação.";
     if (response.status === 401) window.dispatchEvent(new Event("autus:unauthorized"));
-    throw new Error(message);
+    throw new RequestError(message, response.status);
   }
   return response;
+}
+
+export async function retryUploadRequest(path: string, options: RequestInit, teamId: string): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await request(path, options, teamId);
+    } catch (error) {
+      const retryable = error instanceof TypeError || (error instanceof RequestError && (error.status === 408 || error.status === 429 || error.status >= 500));
+      if (!retryable || attempt >= 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+    }
+  }
 }
 
 export async function api<T>(path: string, method = "GET", data?: unknown, teamId?: string): Promise<T> {
@@ -39,10 +57,10 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
   let jobId = "";
   try {
     for (let offset = 0, part = 0; offset < file.size; offset += upload.chunk_size, part++) {
-      await request(`/uploads/${upload.id}/${part}`, { method: "PUT", body: file.slice(offset, offset + upload.chunk_size), headers: { "content-type": "application/octet-stream" } }, teamId);
+      await retryUploadRequest(`/uploads/${upload.id}/${part}`, { method: "PUT", body: file.slice(offset, offset + upload.chunk_size), headers: { "content-type": "application/octet-stream" } }, teamId);
       onProgress("Enviando arquivo…", Math.round(Math.min(offset + upload.chunk_size, file.size) / file.size * 15));
     }
-    const job = await api<{ id: string }>(`/uploads/${upload.id}/process`, "POST", undefined, teamId);
+    const job: { id: string } = await (await retryUploadRequest(`/uploads/${upload.id}/process`, { method: "POST" }, teamId)).json();
     jobId = job.id;
   } catch (error) {
     await api(`/uploads/${upload.id}`, "DELETE", undefined, teamId).catch(() => undefined);
