@@ -253,7 +253,7 @@ def test_extract_fallback_to_gemini_for_scanned_pages_when_tesseract_returns_no_
     assert r.status_code == 200
     assert r.headers["x-provider-used"] == "gemini"
     assert r.json()["rows_extracted"] == 1
-    gemini_mock.assert_awaited_once_with(b"scanned-pages")
+    gemini_mock.assert_awaited_once_with(b"scanned-pages", None)
     local_vision_mock.assert_not_awaited()
 
 
@@ -269,4 +269,4 @@ def test_extract_does_not_send_native_pdf_to_gemini_when_no_scanned_pages():
         r = client.post("/extract", files={"file": ("test.pdf", data, "application/pdf")})
 
     assert r.status_code == 422
-    gemini_mock.assert_awaited_once_with(None)
+    gemini_mock.assert_awaited_once_with(None, None)

@@ -7,6 +7,7 @@ import pytest
 from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
+    _process_chunk_gemini,
     _record_from_row,
     _single_page_pdf,
     _split_pdf_chunks,
@@ -264,9 +265,9 @@ def test_record_from_row_without_a_second_punch():
 
 # ── streaming ────────────────────────────────────────────────────────────────
 
-async def _stream_events(pdf, stem="504"):
+async def _stream_events(pdf, stem="504", **kwargs):
     events = []
-    async for chunk in stream_guia_extraction(pdf, stem):
+    async for chunk in stream_guia_extraction(pdf, stem, **kwargs):
         for line in chunk.splitlines():
             if line.startswith("data: "):
                 events.append(json.loads(line[6:]))
@@ -301,10 +302,113 @@ async def test_stream_reports_both_providers_when_a_page_falls_back():
 
 
 @pytest.mark.anyio
+async def test_gemini_reads_one_guia_page_per_request():
+    """Each guia is a self-contained form: two on one request invites bleed."""
+
+    seen = []
+
+    async def fake_adaptive(pdf_bytes, chunk_size=None, semaphore=None):
+        seen.append(chunk_size)
+        return []
+
+    with patch("services.gemini_service.extract_with_gemini_adaptive", new=fake_adaptive), \
+         patch("services.gemini_service.is_gemini_configured", return_value=True):
+        await _process_chunk_gemini(_make_minimal_pdf(4))
+
+    assert seen == [1]
+
+
+# ── concurrency ──────────────────────────────────────────────────────────────
+
+def _concurrency_probe(records, delay=0.02):
+    """A fake Gemini chunk call that records how many ran at the same time."""
+    state = {"running": 0, "peak": 0}
+
+    async def fake_gemini(chunk_bytes, semaphore=None):
+        import asyncio
+
+        state["running"] += 1
+        state["peak"] = max(state["peak"], state["running"])
+        try:
+            await asyncio.sleep(delay)
+            return list(records)
+        finally:
+            state["running"] -= 1
+
+    return fake_gemini, state
+
+
+@pytest.mark.anyio
+async def test_stream_reads_chunks_concurrently():
+    weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
+    fake_gemini, state = _concurrency_probe([_guia_record()])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+        events = await _stream_events(_make_minimal_pdf(6), chunk_size=2)
+
+    assert state["peak"] > 1, "chunks must overlap instead of running one after another"
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.anyio
+async def test_stream_retries_unread_pages_concurrently():
+    run = _local_run([(1, None), (2, None), (3, None)])
+    fake_gemini, state = _concurrency_probe([_guia_record()])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+        events = await _stream_events(_make_minimal_pdf(3))
+
+    assert state["peak"] > 1
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.anyio
+async def test_stream_progress_counts_completions_not_positions():
+    """Chunks finish out of order, so progress must only ever move forward."""
+
+    weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
+    fake_gemini, _ = _concurrency_probe([_guia_record()])
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+        events = await _stream_events(_make_minimal_pdf(6), chunk_size=2)
+
+    counted = [e for e in events if e.get("phase") == "processing"]
+    assert counted, "the processing phase must report chunk/total"
+    totals = {e["total"] for e in counted}
+    assert len(totals) == 1
+    done_counts = [e["chunk"] for e in counted]
+    assert done_counts == sorted(done_counts)
+    assert done_counts[0] == 0
+    assert done_counts[-1] == totals.pop()
+
+
+@pytest.mark.anyio
+async def test_stream_shares_one_concurrency_budget_across_chunks():
+    """Every chunk gets the same semaphore, so the budget is not multiplied."""
+
+    weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
+    seen = []
+
+    async def fake_gemini(chunk_bytes, semaphore=None):
+        seen.append(semaphore)
+        return []
+
+    with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
+         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+        await _stream_events(_make_minimal_pdf(6), chunk_size=2)
+
+    assert len(seen) > 1
+    assert all(s is not None and s is seen[0] for s in seen)
+
+
+@pytest.mark.anyio
 async def test_stream_meters_gemini_and_reports_it_as_the_provider():
     from services import ai_usage
 
-    async def fake_gemini(chunk_bytes):
+    async def fake_gemini(chunk_bytes, semaphore=None):
         ai_usage.record("gemini", "gemini-3.8-flash", "extract",
                         {"prompt_tokens": 1000, "cached_tokens": 0, "output_tokens": 500,
                          "thought_tokens": 0, "total_tokens": 1500})

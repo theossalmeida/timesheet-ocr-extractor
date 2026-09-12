@@ -112,10 +112,6 @@ def test_stream_skips_failed_pages_when_ocr_is_not_needed():
             "services.contracheque_extra_hours_service._process_chunk_tesseract",
             MagicMock(),
         ) as tesseract_mock,
-        patch(
-            "services.contracheque_extra_hours_service.pypdf.PdfReader",
-            return_value=MagicMock(pages=[object()]),
-        ),
     ):
         result = asyncio.run(consume())
 

@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 
 from database import pool
 import storage
-from documents import content_hash, discarded, fail_extraction, find_duplicate, finish_extraction, processing_lock, safe_filename
+from documents import content_hash, discarded, fail_extraction, find_duplicate, finish_extraction, processing_lock, queued, safe_filename
+from services import progress as progress_frames
 from security import team, throttle, user
 
 router = APIRouter()
@@ -154,7 +155,7 @@ async def consume_job(extraction_id, upload, content):
                     continue
                 event = json.loads(line[6:])
                 if event.get('type') == 'progress':
-                    progress[str(extraction_id)] = {k:event[k] for k in ('message','chunk','total') if k in event}
+                    progress[str(extraction_id)] = {k:event[k] for k in ('phase','message','chunk','total') if k in event}
                 elif event.get('type') == 'done':
                     await asyncio.to_thread(finish_extraction,extraction_id,event)
                     completed = True
@@ -170,8 +171,18 @@ async def consume_job(extraction_id, upload, content):
 
 
 async def run_job(extraction_id, upload, content):
-    async with processing_lock:
-        await asyncio.to_thread(lambda: asyncio.run(consume_job(extraction_id,upload,content)))
+    key = str(extraction_id)
+    queued.add(key)
+    progress[key] = progress_frames.queued_payload()
+    try:
+        async with processing_lock:
+            queued.discard(key)
+            await asyncio.to_thread(lambda: asyncio.run(consume_job(extraction_id,upload,content)))
+    finally:
+        queued.discard(key)
+        # consume_job clears this once it runs; a job cancelled while still
+        # queued never gets there, so drop the entry here too.
+        progress.pop(key,None)
 
 
 @router.post('/uploads/{upload_id}/process')
@@ -196,7 +207,7 @@ def job_status(extraction_id: UUID, request: Request):
                 raise HTTPException(404,'Documento não encontrado.')
             return {'id':extraction_id,'status':outcome['status'],'error':outcome['error'],'artifacts':[],'progress':{'message':outcome['error'],'chunk':0,'total':1}}
         row['artifacts'] = conn.execute("SELECT id,kind,filename FROM artifacts WHERE extraction_id=%s AND kind!='original'", (extraction_id,)).fetchall()
-    row['progress'] = progress.get(str(extraction_id),{'message':'Aguardando processamento…','chunk':0,'total':1})
+    row['progress'] = progress.get(str(extraction_id),progress_frames.queued_payload())
     return row
 
 

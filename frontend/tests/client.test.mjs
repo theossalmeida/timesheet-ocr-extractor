@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import ts from 'typescript';
 
-const source = await readFile(new URL('../src/lib/client.ts', import.meta.url), 'utf8');
-const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
-const { extract, retryUploadRequest } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+// client.ts imports its siblings, so the transpiled output has to sit in a real
+// directory: a data: URL cannot resolve a relative specifier.
+const outDir = await mkdtemp(join(tmpdir(), 'client-test-'));
+for (const name of ['progress', 'client']) {
+  const source = await readFile(new URL(`../src/lib/${name}.ts`, import.meta.url), 'utf8');
+  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
+  await writeFile(join(outDir, `${name}.mjs`), outputText.replaceAll(/(from ")\.\/([^"]+)(")/g, '$1./$2.mjs$3'));
+}
+const { extract, retryUploadRequest } = await import(pathToFileURL(join(outDir, 'client.mjs')).href);
 
 for (const failure of ['network', 503, 408]) {
   test(`retries the same upload part after ${failure}`, async (t) => {
@@ -84,7 +93,9 @@ test('uploads at most three parts concurrently and processes only after all part
   assert.equal(processCalls, 1);
   assert.equal([...uploaded].sort(([a], [b]) => a - b).map(([, body]) => body).join(''), '%PDFabcdefghijklm');
   assert.deepEqual(progress, [...progress].sort((a, b) => a - b));
-  assert.equal(progress.at(-1), 15);
+  // Uploading holds the bar at 0: it only moves once the server reports
+  // finished work units, so every mode advances on the same scale.
+  assert.deepEqual([...new Set(progress)], [0]);
 });
 
 test('waits for in-flight uploads before cleanup and stops scheduling after failure', async (t) => {
@@ -118,4 +129,31 @@ test('waits for in-flight uploads before cleanup and stops scheduling after fail
   await rejected;
   assert.deepEqual(started, [0, 1, 2]);
   assert.equal(deleted, true);
+});
+
+test('a dropped poll keeps the bar where it was instead of rewinding to zero', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', (callback) => { callback(); return 0; });
+  const polls = [
+    Response.json({ status: 'processing', artifacts: [], progress: { phase: 'processing', chunk: 7, total: 10 } }),
+    null, // the tunnel drops one poll mid-run
+    Response.json({ status: 'done', artifacts: [{ id: 'a', kind: 'excel', filename: 'r.xlsx' }] }),
+  ];
+  let poll = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url === '/api/uploads') return Response.json({ id: 'upload', chunk_size: 64 });
+    if (options?.method === 'PUT') return new Response('{}');
+    if (url === '/api/uploads/upload/process') return Response.json({ id: 'job' });
+    const next = polls[poll++];
+    if (!next) throw new TypeError('Failed to fetch');
+    return next;
+  });
+
+  const seen = [];
+  await extract(new File(['%PDF'], 'test.pdf'), 'cartao', 'team', (message, value) => seen.push([message, value]));
+
+  assert.deepEqual(seen, [...seen].sort((a, b) => a[1] - b[1]), 'progress must never go backwards');
+  const reconnect = seen.find(([message]) => message.startsWith('Reconectando'));
+  assert.ok(reconnect, 'the dropped poll should have been reported');
+  // processing spans 0-99, so 7 of 10 finished units is 69%, not 70%.
+  assert.equal(reconnect[1], 69, 'it must hold the last known percentage');
 });

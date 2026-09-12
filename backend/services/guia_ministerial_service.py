@@ -8,10 +8,18 @@ import pypdf
 logger = logging.getLogger(__name__)
 
 from models.timesheet import TimesheetRow
-from services import ai_usage
+from services import ai_usage, progress
 from utils.normalizers import normalize_date, normalize_time
 
-CHUNK_SIZE = 20  # pages per Gemini request (keeps progress updates granular)
+# A guia is one self-contained service form per page, so each request carries a
+# single page: nothing is gained by showing the model two unrelated forms at
+# once, and doing so lets it carry a field from one page onto the other.
+#
+# That also makes the page the unit of work, so progress counts pages - the
+# thing the person watching actually recognises - and the bar moves one page at
+# a time instead of jumping a whole block.
+GEMINI_PAGES_PER_REQUEST = 1
+CHUNK_SIZE = GEMINI_PAGES_PER_REQUEST
 
 # Guia Ministerial / Papeleta de Servico Externo forms are filled in by hand.
 # The only machine-readable text on a scanned guia is usually the electronic
@@ -85,7 +93,20 @@ def _record_from_row(row: TimesheetRow) -> dict:
     }
 
 
-async def _process_chunk_gemini(chunk_bytes: bytes) -> list[dict]:
+def _gemini_semaphore() -> asyncio.Semaphore:
+    """One Gemini concurrency budget, shared by every chunk of a document.
+
+    Chunks run concurrently, and each one fans out internally, so without a
+    shared budget the in-flight request count would be the product of the two.
+    """
+    from services.gemini_service import _max_concurrent_chunks
+
+    return asyncio.Semaphore(_max_concurrent_chunks())
+
+
+async def _process_chunk_gemini(
+    chunk_bytes: bytes, semaphore: asyncio.Semaphore | None = None
+) -> list[dict]:
     """Paid vision fallback for pages Tesseract cannot read.
 
     Many guias are filled out by hand and Tesseract is a printed-text engine,
@@ -104,7 +125,9 @@ async def _process_chunk_gemini(chunk_bytes: bytes) -> list[dict]:
         return []
 
     try:
-        rows = await extract_with_gemini_adaptive(chunk_bytes)
+        rows = await extract_with_gemini_adaptive(
+            chunk_bytes, chunk_size=GEMINI_PAGES_PER_REQUEST, semaphore=semaphore
+        )
     except GeminiExtractionError as e:
         logger.warning("guia: Gemini OCR failed: %s", e)
         return []
@@ -162,11 +185,21 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     return rows
 
 
+async def _gemini_page_retry(
+    pdf_bytes: bytes, page_number: int, semaphore: asyncio.Semaphore
+) -> list[dict]:
+    """Re-read one page the local model could not, splitting it off-thread."""
+    page_pdf = await asyncio.to_thread(_single_page_pdf, pdf_bytes, page_number)
+    return await _process_chunk_gemini(page_pdf, semaphore)
+
+
 async def _gemini_whole_document(pdf_bytes: bytes, chunk_size: int) -> list[dict]:
-    records: list[dict] = []
-    for chunk in _split_pdf_chunks(pdf_bytes, chunk_size):
-        records.extend(await _process_chunk_gemini(chunk))
-    return records
+    semaphore = _gemini_semaphore()
+    chunks = await asyncio.to_thread(_split_pdf_chunks, pdf_bytes, chunk_size)
+    results = await asyncio.gather(
+        *(_process_chunk_gemini(chunk, semaphore) for chunk in chunks)
+    )
+    return [record for chunk_records in results for record in chunk_records]
 
 
 async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_size: int = CHUNK_SIZE):
@@ -175,9 +208,6 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
     import base64 as _b64
     from services.excel_builder import build_guia_excel
     from services.csv_builder import build_guia_csv
-
-    def progress(step: str, message: str) -> str:
-        return f"data: {_json.dumps({'type': 'progress', 'step': step, 'message': message})}\n\n"
 
     async def drain(coro):
         """Run `coro`, holding the SSE connection open while it works.
@@ -191,14 +221,40 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                 yield await asyncio.wait_for(asyncio.shield(task), timeout=15)
                 return
             except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
+                yield progress.keep_alive()
+
+    async def drain_parallel(coros, step):
+        """Run `coros` concurrently, reporting each one as it finishes.
+
+        Yields SSE strings, then the concatenated records. Progress counts
+        completions rather than positions, because results arrive out of order.
+        """
+        tasks = [asyncio.create_task(c) for c in coros]
+        pending = set(tasks)
+        total = len(tasks)
+        finished = 0
+        try:
+            yield progress.processing(finished, total, step=step)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=15, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    yield progress.keep_alive()
+                    continue
+                finished += len(done)
+                yield progress.processing(finished, total, step=step)
+            yield [record for task in tasks for record in task.result()]
+        finally:
+            for task in tasks:
+                task.cancel()
 
     try:
         with ai_usage.recording() as ai_calls:
             all_records: list[dict] = []
             used: list[str] = []
 
-            yield progress("local-vision", "IA local: lendo as primeiras paginas da guia...")
+            yield progress.detecting(step="local-vision")
             run = None
             async for item in drain(_run_local(pdf_bytes)):
                 if isinstance(item, str):
@@ -214,16 +270,19 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                 )
                 # Pages the local model could not read are retried individually
                 # rather than sending the whole document back to a paid model.
+                retry_pages = []
                 for outcome in run.outcomes:
                     if outcome.record:
                         all_records.append(outcome.record)
-                        continue
-                    yield progress(
+                    else:
+                        retry_pages.append(outcome.page_number)
+
+                if retry_pages:
+                    semaphore = _gemini_semaphore()
+                    async for item in drain_parallel(
+                        [_gemini_page_retry(pdf_bytes, page, semaphore) for page in retry_pages],
                         "gemini",
-                        f"IA (Gemini): relendo a pagina {outcome.page_number}...",
-                    )
-                    page_pdf = _single_page_pdf(pdf_bytes, outcome.page_number)
-                    async for item in drain(_process_chunk_gemini(page_pdf)):
+                    ):
                         if isinstance(item, str):
                             yield item
                         else:
@@ -233,25 +292,26 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
             else:
                 reason = run.reason if run is not None else "IA local indisponivel"
                 logger.info("guia: local reading rejected (%s); using Gemini", reason)
-                chunks = _split_pdf_chunks(pdf_bytes, chunk_size)
-                for i, chunk in enumerate(chunks):
-                    yield progress(
-                        "gemini",
-                        f"IA (Gemini): processando parte {i + 1} de {len(chunks)}...",
-                    )
-                    async for item in drain(_process_chunk_gemini(chunk)):
-                        if isinstance(item, str):
-                            yield item
-                        else:
-                            if item and "gemini-guia" not in used:
-                                used.append("gemini-guia")
-                            all_records.extend(item)
+                semaphore = _gemini_semaphore()
+                chunks = await asyncio.to_thread(_split_pdf_chunks, pdf_bytes, chunk_size)
+                async for item in drain_parallel(
+                    [_process_chunk_gemini(chunk, semaphore) for chunk in chunks],
+                    "gemini",
+                ):
+                    if isinstance(item, str):
+                        yield item
+                    else:
+                        if item and "gemini-guia" not in used:
+                            used.append("gemini-guia")
+                        all_records.extend(item)
 
             rows = _aggregate(all_records)
 
             if not rows:
                 yield f"data: {_json.dumps({'type': 'error', 'message': 'Nenhum registro encontrado nas guias ministeriais.'})}\n\n"
                 return
+
+            yield progress.building()
 
             excel_bytes = build_guia_excel(rows)
             csv_bytes, csv_mime = build_guia_csv(rows)
@@ -286,17 +346,23 @@ async def extract_with_guia_ministerial(
             run.confidence * 100, len(run.outcomes),
         )
         records: list[dict] = []
+        retry_pages = []
         for outcome in run.outcomes:
             if outcome.record:
                 records.append(outcome.record)
-                continue
+            else:
+                retry_pages.append(outcome.page_number)
+
+        if retry_pages:
             logger.info(
-                "guia: page %d unreadable locally; retrying it with Gemini",
-                outcome.page_number,
+                "guia: %d page(s) unreadable locally; retrying them with Gemini - pages %s",
+                len(retry_pages), retry_pages,
             )
-            records.extend(
-                await _process_chunk_gemini(_single_page_pdf(pdf_bytes, outcome.page_number))
+            semaphore = _gemini_semaphore()
+            retried = await asyncio.gather(
+                *(_gemini_page_retry(pdf_bytes, page, semaphore) for page in retry_pages)
             )
+            records.extend(record for page_records in retried for record in page_records)
     else:
         reason = run.reason if run is not None else "local vision OCR unavailable"
         logger.info("guia: local reading rejected (%s); using Gemini", reason)

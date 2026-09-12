@@ -5,7 +5,7 @@ import base64
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import pypdf
@@ -21,7 +21,27 @@ from utils.normalizers import normalize_date, normalize_time, normalize_ocorrenc
 GEMINI_PAGE_CHUNK_SIZE = 2
 GEMINI_TIMEOUT_SECONDS = 180.0
 GEMINI_RETRIES = 2
-GEMINI_MAX_CONCURRENT_CHUNKS = 3
+# Statuses worth retrying: the quota and overload responses are transient, and
+# concurrency high enough to hit them must back off rather than drop the chunk.
+GEMINI_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _max_concurrent_chunks() -> int:
+    return max(1, settings.GEMINI_MAX_CONCURRENT_CHUNKS)
+
+
+def _connection_limits() -> httpx.Limits:
+    """Sockets to match the concurrency, so the pool is not the new bottleneck."""
+    allowed = _max_concurrent_chunks()
+    return httpx.Limits(max_connections=allowed, max_keepalive_connections=allowed)
+
+
+def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+    """Honour Retry-After when the quota response carries one, else back off."""
+    try:
+        return min(60.0, max(0.0, float(response.headers.get("retry-after", ""))))
+    except (TypeError, ValueError):
+        return 2.0 * attempt
 
 
 def is_gemini_configured() -> bool:
@@ -227,7 +247,6 @@ async def extract_with_gemini(
                     params={"key": settings.GEMINI_API_KEY},
                     json=body,
                 )
-            break
         except (httpx.TimeoutException, httpx.RequestError) as e:
             _record_uncertain_request(e, 'extract')
             if attempt >= GEMINI_RETRIES:
@@ -241,6 +260,18 @@ async def extract_with_gemini(
                 e,
             )
             await asyncio.sleep(2 * attempt)
+            continue
+
+        if response.status_code in GEMINI_RETRY_STATUSES and attempt < GEMINI_RETRIES:
+            logger.warning(
+                "Gemini returned %d on attempt %d/%d; backing off",
+                response.status_code,
+                attempt,
+                GEMINI_RETRIES,
+            )
+            await asyncio.sleep(_retry_after_seconds(response, attempt))
+            continue
+        break
 
     if response is None:
         raise GeminiExtractionError("Gemini request did not return a response")
@@ -277,22 +308,43 @@ def _split_pdf_into_chunks(
 async def extract_with_gemini_adaptive(
     pdf_bytes: bytes,
     chunk_size: int = GEMINI_PAGE_CHUNK_SIZE,
+    semaphore: asyncio.Semaphore | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[TimesheetRow]:
+    """Extract a PDF, splitting it into page chunks sent concurrently.
+
+    Pass `semaphore` to share one concurrency budget across several calls;
+    without it each call gets its own, so N concurrent callers would reach
+    N times the per-call limit in flight.
+
+    `on_progress(done, total)` fires as each chunk finishes, so a caller
+    streaming to a browser can report real progress instead of a guess.
+    """
     if not is_gemini_configured():
         return []
     if chunk_size < 1:
         raise ValueError("chunk_size must be positive")
 
+    semaphore = semaphore or asyncio.Semaphore(_max_concurrent_chunks())
+
+    def report(done: int, total: int) -> None:
+        if on_progress is not None:
+            on_progress(done, total)
+
     try:
         reader = pypdf.PdfReader(BytesIO(pdf_bytes))
         page_count = len(reader.pages)
     except Exception:
-        return await extract_with_gemini(pdf_bytes)
+        async with semaphore:
+            rows = await extract_with_gemini(pdf_bytes)
+        report(1, 1)
+        return rows
 
     if page_count <= chunk_size:
-        return await extract_with_gemini(pdf_bytes)
-
-    semaphore = asyncio.Semaphore(GEMINI_MAX_CONCURRENT_CHUNKS)
+        async with semaphore:
+            rows = await extract_with_gemini(pdf_bytes)
+        report(1, 1)
+        return rows
 
     async def extract_chunk(
         chunk: bytes, client: httpx.AsyncClient
@@ -315,9 +367,22 @@ async def extract_with_gemini_adaptive(
             return chunk_rows, last_error
 
     chunks = await asyncio.to_thread(_split_pdf_into_chunks, pdf_bytes, chunk_size, reader=reader)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS)) as client:
+    finished = 0
+    report(finished, len(chunks))
+
+    async def extract_and_report(chunk: bytes, client: httpx.AsyncClient):
+        nonlocal finished
+        try:
+            return await extract_chunk(chunk, client)
+        finally:
+            finished += 1
+            report(finished, len(chunks))
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS), limits=_connection_limits()
+    ) as client:
         results = await asyncio.gather(
-            *(extract_chunk(chunk, client) for chunk in chunks),
+            *(extract_and_report(chunk, client) for chunk in chunks),
             return_exceptions=True,
         )
     rows: list[TimesheetRow] = []

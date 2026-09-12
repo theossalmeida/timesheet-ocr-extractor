@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # match one litellm knows a price for.
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.8-flash"
+    # How many Gemini requests a single document may have in flight. The account
+    # allows 2000 requests/minute, far more than one document ever needs, so this
+    # is sized to bound memory and open sockets rather than to stay under quota.
+    GEMINI_MAX_CONCURRENT_CHUNKS: int = 32
     MISTRAL_API_KEY: str = ""
     GOOGLE_CLOUD_API_KEY: str = ""
     # Fallback USD/BRL rate used to price AI usage when the daily quote cannot

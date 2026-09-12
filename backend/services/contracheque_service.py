@@ -7,6 +7,8 @@ import re
 import pdfplumber
 import pypdf
 
+from services import progress
+
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 5  # pages per local-OCR request (keeps progress updates granular)
@@ -436,10 +438,8 @@ async def stream_contracheque_extraction(
     from services.contracheque_excel_builder import build_contracheque_excel
 
     try:
-        total_pages = len(pypdf.PdfReader(io.BytesIO(pdf_bytes)).pages)
-
         # ── Step 1: pdfplumber ──────────────────────────────────────
-        yield f"data: {_json.dumps({'type': 'progress', 'chunk': 0, 'total': 1, 'step': 'pdfplumber', 'message': f'Analisando {total_pages} páginas com pdfplumber...'})}\n\n"
+        yield progress.detecting(step="pdfplumber")
 
         plumber_results, failed_indices = await asyncio.get_running_loop().run_in_executor(
             None, _extract_all_pdfplumber, pdf_bytes
@@ -464,20 +464,22 @@ async def stream_contracheque_extraction(
             total_chunks = len(ocr_chunks)
 
             for i, chunk in enumerate(ocr_chunks):
-                yield f"data: {_json.dumps({'type': 'progress', 'chunk': i + 1, 'total': total_chunks, 'step': 'tesseract', 'message': f'OCR local (Tesseract): processando parte {i + 1} de {total_chunks}...'})}\n\n"
+                yield progress.processing(i, total_chunks, step="tesseract")
 
                 task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
                 while not task.done():
-                    yield ": keep-alive\n\n"
-                    await asyncio.sleep(15)
+                    await asyncio.wait({task}, timeout=15)
+                    if not task.done():
+                        yield progress.keep_alive()
 
                 chunk_pages = task.result()
                 if chunk_pages:
                     ocr_found_rows = True
                 all_pages.extend(chunk_pages)
+                yield progress.processing(i + 1, total_chunks, step="tesseract")
         else:
             # Signal 100% even if no OCR was needed
-            yield f"data: {_json.dumps({'type': 'progress', 'chunk': 1, 'total': 1, 'step': 'pdfplumber', 'message': 'Extração concluída com pdfplumber.'})}\n\n"
+            yield progress.processing(1, 1, step="pdfplumber")
 
         # ── Step 3: aggregate + build Excel ──────────────────────────
         salary_data = _aggregate_salary_data(all_pages)
@@ -494,6 +496,8 @@ async def stream_contracheque_extraction(
                 "tesseract" if ocr_found_rows else "pdfplumber"
             ))
         )
+
+        yield progress.building()
 
         excel_bytes = build_contracheque_excel(salary_data)
 

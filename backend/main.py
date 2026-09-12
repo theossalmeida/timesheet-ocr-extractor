@@ -42,7 +42,8 @@ from services.local_vision_ocr_service import (
     extract_timesheet_rows_local_vision,
     is_local_vision_ocr_configured,
 )
-from services import ai_usage
+from services import ai_usage, progress as progress_phases
+from services.progress import keep_alive as progress_keep_alive, progress as progress_frame
 from services.pdf_detector import detect_pdf_type
 from services.pdfplumber_service import extract_with_pdfplumber, get_scanned_page_bytes
 from services.tesseract_ocr_service import (
@@ -156,7 +157,7 @@ def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
 
 
 
-async def _run_gemini_timesheet(scanned_pdf_bytes: bytes | None) -> list:
+async def _run_gemini_timesheet(scanned_pdf_bytes: bytes | None, on_progress=None) -> list:
     """Run Gemini only for scanned/image-only PDF pages."""
     if not scanned_pdf_bytes:
         logger.debug("Gemini OCR skipped: no scanned/image-only pages")
@@ -165,7 +166,7 @@ async def _run_gemini_timesheet(scanned_pdf_bytes: bytes | None) -> list:
         logger.debug("Gemini OCR is not configured, skipping")
         return []
     try:
-        rows = await extract_with_gemini_adaptive(scanned_pdf_bytes)
+        rows = await extract_with_gemini_adaptive(scanned_pdf_bytes, on_progress=on_progress)
         if rows:
             logger.info("Gemini OCR extracted %d row(s)", len(rows))
         return rows
@@ -204,7 +205,7 @@ async def _run_local_vision_timesheet(pdf_bytes: bytes | None) -> list:
         logger.warning("Local vision OCR raised unexpected error: %s", e)
         return []
 
-async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str, list[dict]]:
+async def _run_pipeline(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionResult, str, list[dict]]:
     """Run the extraction pipeline, metering the paid AI calls it makes.
 
     Returns (result, provider, ai_calls), where ai_calls is one entry per
@@ -213,11 +214,11 @@ async def _run_pipeline(pdf_bytes: bytes) -> tuple[ExtractionResult, str, list[d
     the document cost is computed from (documents.finish_extraction).
     """
     with ai_usage.recording() as ai_calls:
-        result, provider = await _extract_rows(pdf_bytes)
+        result, provider = await _extract_rows(pdf_bytes, on_progress=on_progress)
     return result, provider, ai_calls
 
 
-async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
+async def _extract_rows(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionResult, str]:
     """Run extraction pipeline: pdfplumber -> Tesseract -> Gemini/local vision OCR. Returns (result, provider).
 
     Tesseract runs locally over rendered page images for anything pdfplumber
@@ -250,7 +251,7 @@ async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
                 rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
                 logger.info("Hybrid merge - total rows=%d", len(rows))
             else:
-                extra_rows = await _run_gemini_timesheet(scanned_bytes)
+                extra_rows = await _run_gemini_timesheet(scanned_bytes, on_progress)
                 if extra_rows:
                     provider = "pdfplumber+gemini"
                     rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
@@ -269,7 +270,7 @@ async def _extract_rows(pdf_bytes: bytes) -> tuple[ExtractionResult, str]:
         if rows:
             provider = "tesseract"
         else:
-            rows = await _run_gemini_timesheet(scanned_bytes)
+            rows = await _run_gemini_timesheet(scanned_bytes, on_progress)
             if rows:
                 provider = "gemini"
             else:
@@ -326,30 +327,44 @@ def _timesheet_bundle_content(result: ExtractionResult, provider: str, original_
 
 
 async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
-    yield "data: " + json.dumps({
-        "type": "progress",
-        "chunk": 1,
-        "total": 5,
-        "step": "received",
-        "message": "Arquivo recebido. Analisando PDF...",
-    }, ensure_ascii=False) + "\n\n"
+    yield progress_frame(progress_phases.DETECTING, "Identificando melhor abordagem...", step="received")
 
-    task = asyncio.create_task(_run_pipeline(pdf_bytes))
-    yielded_extracting = False
-    while not task.done():
-        if not yielded_extracting:
-            yielded_extracting = True
-            yield "data: " + json.dumps({
-                "type": "progress",
-                "chunk": 2,
-                "total": 5,
-                "step": "extracting",
-                "message": "Extraindo registros...",
-            }, ensure_ascii=False) + "\n\n"
+    # The pipeline reports chunk completions from inside; the queue carries them
+    # out to this generator, which is the only place allowed to write the stream.
+    updates: asyncio.Queue[tuple[int, int]] = asyncio.Queue()
+    task = asyncio.create_task(
+        _run_pipeline(pdf_bytes, on_progress=lambda done, total: updates.put_nowait((done, total)))
+    )
 
-        await asyncio.wait({task}, timeout=10)
-        if not task.done():
-            yield ": keep-alive\n\n"
+    yield progress_frame(progress_phases.PROCESSING, "Processando arquivo...", 0, 1, step="extracting")
+    # Wait on the next update and on the pipeline itself: waiting on the queue
+    # alone would hold the stream open for the whole timeout after the pipeline
+    # has already finished, which is every run that never reaches Gemini.
+    pending_update: asyncio.Task | None = None
+    try:
+        while not task.done():
+            if pending_update is None:
+                pending_update = asyncio.ensure_future(updates.get())
+            finished, _ = await asyncio.wait(
+                {pending_update, task}, timeout=10, return_when=asyncio.FIRST_COMPLETED
+            )
+            if pending_update in finished:
+                done, total = pending_update.result()
+                pending_update = None
+                yield progress_frame(
+                    progress_phases.PROCESSING, "Processando arquivo...", done, total, step="extracting"
+                )
+            elif not finished:
+                yield progress_keep_alive()
+    finally:
+        if pending_update is not None:
+            pending_update.cancel()
+
+    while not updates.empty():
+        done, total = updates.get_nowait()
+        yield progress_frame(
+            progress_phases.PROCESSING, "Processando arquivo...", done, total, step="extracting"
+        )
 
     try:
         result, provider, ai_calls = task.result()
@@ -369,13 +384,7 @@ async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
         }, ensure_ascii=False) + "\n\n"
         return
 
-    yield "data: " + json.dumps({
-        "type": "progress",
-        "chunk": 4,
-        "total": 5,
-        "step": "building",
-        "message": "Gerando arquivos...",
-    }, ensure_ascii=False) + "\n\n"
+    yield progress_frame(progress_phases.BUILDING, "Montando planilha...", 0, 1, step="building")
 
     content = await asyncio.to_thread(_timesheet_bundle_content, result, provider, original_stem, ai_calls)
     content["type"] = "done"

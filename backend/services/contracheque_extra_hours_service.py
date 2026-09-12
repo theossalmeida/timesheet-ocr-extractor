@@ -8,8 +8,8 @@ import logging
 import re
 
 import pdfplumber
-import pypdf
 
+from services import progress
 from services.contracheque_service import (
     CHUNK_SIZE,
     _extract_all_pdfplumber,
@@ -113,15 +113,7 @@ async def stream_contracheque_extra_hours_extraction(
     chunk_size: int = CHUNK_SIZE,
 ):
     try:
-        total_pages = len(pypdf.PdfReader(io.BytesIO(pdf_bytes)).pages)
-
-        yield "data: " + json.dumps({
-            "type": "progress",
-            "chunk": 0,
-            "total": 1,
-            "step": "pdfplumber",
-            "message": f"Analisando {total_pages} paginas com pdfplumber...",
-        }) + "\n\n"
+        yield progress.detecting(step="pdfplumber")
 
         plumber_results, failed_indices = await asyncio.get_running_loop().run_in_executor(
             None,
@@ -142,31 +134,21 @@ async def stream_contracheque_extra_hours_extraction(
             total_chunks = len(ocr_chunks)
 
             for i, chunk in enumerate(ocr_chunks):
-                yield "data: " + json.dumps({
-                    "type": "progress",
-                    "chunk": i + 1,
-                    "total": total_chunks,
-                    "step": "tesseract",
-                    "message": f"OCR local (Tesseract): processando parte {i + 1} de {total_chunks}...",
-                }) + "\n\n"
+                yield progress.processing(i, total_chunks, step="tesseract")
 
                 task = asyncio.create_task(asyncio.to_thread(_process_chunk_tesseract, chunk))
                 while not task.done():
-                    yield ": keep-alive\n\n"
-                    await asyncio.sleep(15)
+                    await asyncio.wait({task}, timeout=15)
+                    if not task.done():
+                        yield progress.keep_alive()
 
                 chunk_pages = task.result()
                 if chunk_pages:
                     ocr_found_rows = True
                 all_pages.extend(chunk_pages)
+                yield progress.processing(i + 1, total_chunks, step="tesseract")
         else:
-            yield "data: " + json.dumps({
-                "type": "progress",
-                "chunk": 1,
-                "total": 1,
-                "step": "pdfplumber",
-                "message": "Extracao concluida com pdfplumber.",
-            }) + "\n\n"
+            yield progress.processing(1, 1, step="pdfplumber")
 
         extra_hours_data, columns = aggregate_extra_hours(all_pages)
         if not extra_hours_data or not columns:
@@ -183,6 +165,8 @@ async def stream_contracheque_extra_hours_extraction(
                 "tesseract" if ocr_found_rows else "pdfplumber"
             ))
         )
+        yield progress.building()
+
         excel_bytes = build_contracheque_extra_hours_excel(extra_hours_data, columns)
 
         yield "data: " + json.dumps({

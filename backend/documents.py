@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from database import pool
-from services import fx
+from services import fx, progress
 from services.ai_pricing import price_calls
 import storage
 from security import team, user
@@ -19,6 +19,10 @@ from security import team, user
 router = APIRouter()
 logger = logging.getLogger(__name__)
 processing_lock = asyncio.Lock()
+# Extraction ids whose job exists but has not won `processing_lock` yet. The row
+# carries status 'processing' from the moment it is written, so without this the
+# history cannot tell a document being worked on from one still waiting its turn.
+queued = set()
 EXCEL_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 
@@ -183,11 +187,16 @@ def purge_incomplete():
 async def stored_stream(request, pdf_bytes, filename, mode, factory):
     extraction_id = await asyncio.to_thread(create_extraction,request,filename,mode,pdf_bytes)
     completed = False
+    # Same bookkeeping jobs.run_job does: the row already reads 'processing',
+    # so the history needs this to know the document has not started yet.
+    key = str(extraction_id)
+    queued.add(key)
     try:
         while processing_lock.locked():
-            yield 'data: '+json.dumps({'type':'progress','chunk':0,'total':1,'message':'Aguardando outro documento terminar.'})+'\n\n'
+            yield progress.queued()
             await asyncio.sleep(2)
         async with processing_lock:
+            queued.discard(key)
             async for chunk in factory():
                 for line in chunk.splitlines():
                     if not line.startswith('data: '):
@@ -213,6 +222,7 @@ async def stored_stream(request, pdf_bytes, filename, mode, factory):
         logger.exception('Extraction failed: %s',extraction_id)
         yield 'data: '+json.dumps({'type':'error','message':'Não foi possível processar ou salvar o documento. Tente novamente.'})+'\n\n'
     finally:
+        queued.discard(key)
         if not completed:
             await asyncio.shield(asyncio.to_thread(fail_extraction,extraction_id,'interrupted'))
 
@@ -226,6 +236,10 @@ def history(request: Request, q: str = Query(default='',max_length=200), offset:
         artifacts = conn.execute("SELECT id,extraction_id,kind,filename,size_bytes FROM artifacts WHERE extraction_id=ANY(%s)", ([r['id'] for r in visible],)).fetchall() if visible else []
         for row in visible:
             row['artifacts'] = [a for a in artifacts if a['extraction_id']==row['id']]
+            # 'queued' is derived, not stored: the row says 'processing' as soon
+            # as it exists, but only one document holds the slot at a time.
+            if row['status']=='processing' and str(row['id']) in queued:
+                row['status'] = 'queued'
         summary = conn.execute("SELECT count(*) AS documents,COALESCE(sum(cost_brl),0) AS known_cost_brl,count(*) FILTER (WHERE cost_brl IS NULL) AS unknown_costs FROM extractions WHERE team_id=%s AND status=ANY(%s) AND created_at>=date_trunc('month',now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'", (selected['team_id'],list(VISIBLE_STATUSES))).fetchone()
     return {'documents':visible,'has_more':len(rows)>limit,'summary':summary}
 

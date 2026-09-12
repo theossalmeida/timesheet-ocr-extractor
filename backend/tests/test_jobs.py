@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import time
+from threading import Event
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -210,3 +211,60 @@ def test_reuploads_rejoin_running_job_even_when_queue_is_full(owner):
             time.sleep(.1)
         assert status['status'] == 'done', status
     assert len(calls) == 1
+
+
+def test_a_document_waiting_its_turn_is_reported_as_queued(owner):
+    """Only one document is processed at a time, so the ones behind it must say
+    they are waiting - the row reads 'processing' from the moment it is created,
+    which used to make a queued document look like one being worked on."""
+
+    first, second = b'%PDF first in line', b'%PDF second in line'
+    app.state.limiter._limiter.storage.reset()
+    client = TestClient(app, headers=dict(owner.headers), cookies=owner.cookies)
+    with patch("main.initialize"), patch("main.pool.close"), client:
+        uploads = []
+        for name, content in (('primeiro.pdf', first), ('segundo.pdf', second)):
+            upload = client.post('/uploads', json={'filename': name, 'mode': 'cartao', 'size_bytes': len(content)}).json()['id']
+            assert client.put(f'/uploads/{upload}/0', content=content).status_code == 200
+            uploads.append(upload)
+
+        # consume_job runs the stream in its own event loop on another thread,
+        # so the gate has to be a threading primitive, not an asyncio one.
+        release = Event()
+        started = Event()
+
+        async def stream(*args):
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(.01)
+            yield 'data: ' + json.dumps({'type': 'done', 'excel_b64': base64.b64encode(b'PKdata').decode(), 'excel_filename': 'r.xlsx', 'provider': 'pdfplumber'}) + '\n\n'
+
+        with patch('main.stream_timesheet_extraction', stream):
+            running = client.post(f'/uploads/{uploads[0]}/process').json()['id']
+            assert started.wait(5)
+            waiting = client.post(f'/uploads/{uploads[1]}/process').json()['id']
+            assert running != waiting
+
+            for _ in range(40):
+                if client.get('/documents/' + waiting).json()['progress'].get('phase') == 'queued':
+                    break
+                time.sleep(.05)
+
+            status = client.get('/documents/' + waiting).json()
+            assert status['progress']['phase'] == 'queued', status
+            assert status['progress']['message'] == 'Aguardando processamento...'
+
+            listed = {d['id']: d['status'] for d in client.get('/documents', params={'q': '.pdf'}).json()['documents']}
+            assert listed[waiting] == 'queued', listed
+            assert listed[running] == 'processing', listed
+
+            release.set()
+            for _ in range(60):
+                if client.get('/documents/' + waiting).json()['status'] == 'done':
+                    break
+                time.sleep(.1)
+
+        # Once it gets the slot it is no longer queued anywhere.
+        assert client.get('/documents/' + waiting).json()['status'] == 'done'
+        listed = {d['id']: d['status'] for d in client.get('/documents', params={'q': '.pdf'}).json()['documents']}
+        assert 'queued' not in listed.values()

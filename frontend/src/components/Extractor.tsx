@@ -14,7 +14,7 @@ const modes = [
   { key: "horas_extras", label: "Horas Extras", hint: "Uma coluna por verba", max: 200, path: "/contracheque/horas-extras", description: "Envie o PDF de contracheques da Petrobras e baixe uma planilha mensal apenas com verbas de horas extras." },
   { key: "frequencia", label: "Frequência", hint: "Classificação diária de ciclos", max: 200, path: "/extract/frequencia", description: "Envie o relatório de frequência da Petrobras e baixe a classificação diária de ciclos." },
 ];
-const statusLabels: Record<string, string> = { done: "Concluído", failed: "Falhou", processing: "Processando", interrupted: "Interrompido" };
+const statusLabels: Record<string, string> = { done: "Concluído", failed: "Falhou", queued: "Aguardando processamento", processing: "Processando", interrupted: "Interrompido" };
 
 export function Extractor({ team, onBusy }: { team: Team; onBusy: (busy: boolean) => void }) {
   const [mode, setMode] = useState(modes[0]);

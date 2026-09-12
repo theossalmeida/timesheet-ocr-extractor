@@ -33,6 +33,19 @@ export type ExtractionMode =
   | "horas_extras"
   | "frequencia";
 
+/** Server-side phases, reported by every pipeline. Uploading is client-side. */
+export type ExtractionPhase = "queued" | "detecting" | "processing" | "building";
+
+/**
+ * One progress frame. `chunk` counts *finished* units out of `total` — chunks
+ * complete out of order, so it is never a position.
+ */
+export interface ProgressUpdate {
+  phase?: ExtractionPhase;
+  chunk?: number;
+  total?: number;
+}
+
 export type ExtractionStatus =
   | "idle"
   | "uploading"

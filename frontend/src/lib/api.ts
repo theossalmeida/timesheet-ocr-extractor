@@ -1,3 +1,5 @@
+import type { ProgressUpdate } from "@/lib/types";
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -59,7 +61,7 @@ async function _parseError(response: Response, fallback: string): Promise<string
 
 export async function extractTimesheet(
   file: File,
-  onProgress?: (chunk: number, total: number, message?: string) => void,
+  onProgress?: (update: ProgressUpdate) => void,
 ): Promise<BundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -106,7 +108,7 @@ export async function extractTimesheet(
       }
 
       if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+        onProgress?.(event as ProgressUpdate);
       } else if (event.type === "done") {
         return {
           excelBlob: b64ToBlob(
@@ -134,7 +136,7 @@ export async function extractTimesheet(
 
 export async function extractGuia(
   file: File,
-  onProgress?: (chunk: number, total: number) => void,
+  onProgress?: (update: ProgressUpdate) => void,
 ): Promise<BundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -184,7 +186,7 @@ export async function extractGuia(
       }
 
       if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number);
+        onProgress?.(event as ProgressUpdate);
       } else if (event.type === "done") {
         return {
           excelBlob: b64ToBlob(
@@ -209,7 +211,7 @@ export async function extractGuia(
 
 export async function extractContracheque(
   file: File,
-  onProgress?: (chunk: number, total: number, message?: string) => void,
+  onProgress?: (update: ProgressUpdate) => void,
 ): Promise<ContrachequeBundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -259,7 +261,7 @@ export async function extractContracheque(
       }
 
       if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+        onProgress?.(event as ProgressUpdate);
       } else if (event.type === "done") {
         return {
           excelBlob: b64ToBlob(
@@ -281,7 +283,7 @@ export async function extractContracheque(
 
 export async function extractContrachequeExtraHours(
   file: File,
-  onProgress?: (chunk: number, total: number, message?: string) => void,
+  onProgress?: (update: ProgressUpdate) => void,
 ): Promise<ExtraHoursBundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -330,7 +332,7 @@ export async function extractContrachequeExtraHours(
       }
 
       if (event.type === "progress") {
-        onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+        onProgress?.(event as ProgressUpdate);
       } else if (event.type === "done") {
         return {
           excelBlob: b64ToBlob(
@@ -353,7 +355,7 @@ export async function extractContrachequeExtraHours(
 
 export async function extractFrequencia(
   file: File,
-  onProgress?: (chunk: number, total: number, message?: string) => void,
+  onProgress?: (update: ProgressUpdate) => void,
 ): Promise<FrequencyBundleResult> {
   const form = new FormData();
   form.append("file", file);
@@ -400,7 +402,7 @@ export async function extractFrequencia(
 
   const handleEvent = (event: Record<string, unknown>): FrequencyBundleResult | null => {
     if (event.type === "progress") {
-      onProgress?.(event.chunk as number, event.total as number, event.message as string | undefined);
+      onProgress?.(event as ProgressUpdate);
       return null;
     }
 

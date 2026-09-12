@@ -16,6 +16,8 @@ from typing import Iterable
 import pdfplumber
 import pypdf
 
+from services import progress
+
 from services.pdf_detector import has_meaningful_text, page_has_raster_image
 
 logger = logging.getLogger(__name__)
@@ -949,36 +951,27 @@ async def stream_frequency_cycle_extraction(
     from services.frequency_cycle_excel_builder import build_frequency_cycle_excel
 
     try:
-        yield "data: " + json.dumps({
-            "type": "progress",
-            "chunk": 0,
-            "total": 1,
-            "step": "pdfplumber",
-            "message": "Analisando relatorio de frequencia com pdfplumber...",
-        }) + "\n\n"
+        yield progress.detecting(step="pdfplumber")
 
         task = asyncio.create_task(asyncio.to_thread(_extract_frequency_days_and_ocr_chunks, pdf_bytes))
         while not task.done():
-            yield ": keep-alive\n\n"
-            await asyncio.sleep(10)
+            await asyncio.wait({task}, timeout=10)
+            if not task.done():
+                yield progress.keep_alive()
 
         rows, ocr_chunks = task.result()
         provider = "pdfplumber"
 
         if not rows and not ocr_chunks:
-            yield "data: " + json.dumps({
-                "type": "progress",
-                "chunk": 1,
-                "total": 1,
-                "step": "tesseract",
-                "message": "pdfplumber nao encontrou linhas diarias. Tentando OCR local (Tesseract)...",
-            }) + "\n\n"
+            yield progress.processing(0, 1, step="tesseract")
 
             tesseract_task = asyncio.create_task(asyncio.to_thread(_try_tesseract_ocr, pdf_bytes))
             while not tesseract_task.done():
-                yield ": keep-alive\n\n"
-                await asyncio.sleep(10)
+                await asyncio.wait({tesseract_task}, timeout=10)
+                if not tesseract_task.done():
+                    yield progress.keep_alive()
             tesseract_rows = tesseract_task.result()
+            yield progress.processing(1, 1, step="tesseract")
 
             rows = tesseract_rows
             provider = "tesseract" if tesseract_rows else "none"
@@ -988,20 +981,16 @@ async def stream_frequency_cycle_extraction(
             tesseract_rows: list[FrequencyDay] = []
 
             for chunk_index, chunk in enumerate(ocr_chunks, start=1):
-                yield "data: " + json.dumps({
-                    "type": "progress",
-                    "chunk": chunk_index,
-                    "total": total_chunks,
-                    "step": "tesseract",
-                    "message": f"OCR local (Tesseract): processando paginas pendentes ({chunk_index}/{total_chunks})...",
-                }) + "\n\n"
+                yield progress.processing(chunk_index - 1, total_chunks, step="tesseract")
 
                 chunk_task = asyncio.create_task(asyncio.to_thread(_try_tesseract_ocr, chunk))
                 while not chunk_task.done():
-                    yield ": keep-alive\n\n"
-                    await asyncio.sleep(10)
+                    await asyncio.wait({chunk_task}, timeout=10)
+                    if not chunk_task.done():
+                        yield progress.keep_alive()
 
                 chunk_rows = chunk_task.result()
+                yield progress.processing(chunk_index, total_chunks, step="tesseract")
                 if chunk_rows:
                     tesseract_rows.extend(chunk_rows)
                 else:
@@ -1022,6 +1011,8 @@ async def stream_frequency_cycle_extraction(
                 "message": "Nenhuma linha diaria de frequencia encontrada no PDF.",
             }) + "\n\n"
             return
+
+        yield progress.building()
 
         classified = classify_frequency_days(rows)
         excel_bytes = await asyncio.to_thread(

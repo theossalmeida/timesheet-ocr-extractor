@@ -9,7 +9,8 @@ import {
   extractFrequencia,
   ApiError,
 } from "@/lib/api";
-import type { ExtractionHook, ExtractionMode, ExtractionState } from "@/lib/types";
+import type { ExtractionHook, ExtractionMode, ExtractionState, ProgressUpdate } from "@/lib/types";
+import { PHASE_LABELS, UPLOADING_LABEL, phasePercent } from "@/lib/progress";
 
 const IDLE_STATE: ExtractionState = {
   status: "idle",
@@ -29,16 +30,12 @@ export function useExtraction(): ExtractionHook {
   const resultUrlRef = useRef<string | null>(null);
   const csvUrlRef = useRef<string | null>(null);
 
-  const setProgress = useCallback((progress: number, stepLabel: string) => {
-    setState((s) => ({ ...s, progress, stepLabel }));
-  }, []);
-
   const upload = useCallback(
     async (file: File, mode: ExtractionMode) => {
       setState({
         status: "uploading",
         progress: 0,
-        stepLabel: "Enviando arquivo...",
+        stepLabel: UPLOADING_LABEL,
         resultUrl: null,
         excelFilename: null,
         csvUrl: null,
@@ -50,40 +47,17 @@ export function useExtraction(): ExtractionHook {
 
       setState((s) => ({ ...s, status: "processing" }));
 
-      let interval: ReturnType<typeof setInterval> | undefined;
-
-      if (
-        mode !== "cartao" &&
-        mode !== "guia" &&
-        mode !== "contracheque" &&
-        mode !== "horas_extras" &&
-        mode !== "frequencia"
-      ) {
-        const stages: Array<[number, string]> = [
-          [10, "Enviando arquivo..."],
-          [20, "Arquivo recebido. Analisando PDF..."],
-          [40, "Extraindo registros..."],
-          [60, "Processando dados..."],
-          [75, "Gerando arquivos..."],
-        ];
-        let stageIndex = 0;
-        interval = setInterval(() => {
-          if (stageIndex < stages.length) {
-            const [progress, label] = stages[stageIndex];
-            setProgress(progress, label);
-            stageIndex++;
-          } else {
-            clearInterval(interval);
-          }
-        }, 600);
-      } else {
-        setProgress(10, "Enviando arquivo...");
-      }
-
       try {
-        const handleChunkProgress = (chunk: number, total: number, message?: string) => {
-          const pct = Math.round((chunk / total) * 80) + 10;
-          setProgress(pct, message ?? `Processando parte ${chunk} de ${total}...`);
+        // The bar only moves forward: `chunk` counts finished units, and those
+        // arrive out of order once chunks run concurrently.
+        const handleChunkProgress = (update: ProgressUpdate) => {
+          const percent = phasePercent(update);
+          if (percent === null) return;
+          setState((s) => ({
+            ...s,
+            progress: Math.max(s.progress, percent),
+            stepLabel: PHASE_LABELS[update.phase!],
+          }));
         };
 
         if (mode === "contracheque" || mode === "horas_extras") {
@@ -92,11 +66,6 @@ export function useExtraction(): ExtractionHook {
               ? extractContrachequeExtraHours(file, handleChunkProgress)
               : extractContracheque(file, handleChunkProgress)
           );
-          clearInterval(interval);
-
-          setProgress(95, "Quase pronto...");
-          await new Promise((r) => setTimeout(r, 300));
-
           const excelUrl = URL.createObjectURL(result.excelBlob);
           resultUrlRef.current = excelUrl;
 
@@ -120,11 +89,6 @@ export function useExtraction(): ExtractionHook {
           });
         } else if (mode === "frequencia") {
           const result = await extractFrequencia(file, handleChunkProgress);
-          clearInterval(interval);
-
-          setProgress(95, "Quase pronto...");
-          await new Promise((r) => setTimeout(r, 300));
-
           const excelUrl = URL.createObjectURL(result.excelBlob);
           resultUrlRef.current = excelUrl;
 
@@ -146,11 +110,6 @@ export function useExtraction(): ExtractionHook {
               ? extractGuia(file, handleChunkProgress)
               : extractTimesheet(file, handleChunkProgress)
           );
-          clearInterval(interval);
-
-          setProgress(95, "Quase pronto...");
-          await new Promise((r) => setTimeout(r, 300));
-
           const excelUrl = URL.createObjectURL(result.excelBlob);
           resultUrlRef.current = excelUrl;
 
@@ -171,7 +130,6 @@ export function useExtraction(): ExtractionHook {
           });
         }
       } catch (err) {
-        if (interval) clearInterval(interval);
         const message =
           err instanceof ApiError
             ? err.message
@@ -190,7 +148,7 @@ export function useExtraction(): ExtractionHook {
         });
       }
     },
-    [setProgress],
+    [],
   );
 
   const reset = useCallback(() => {

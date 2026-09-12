@@ -1,3 +1,6 @@
+import type { ProgressUpdate } from "./types";
+import { PHASE_LABELS, UPLOADING_LABEL, phaseLabel, phasePercent } from "./progress";
+
 export interface Team { id: string; name: string; role: "admin" | "member" }
 export interface Account { id: string; name: string; email: string }
 export interface Artifact { id: string; kind: "original" | "excel" | "csv"; filename: string }
@@ -58,7 +61,6 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
   try {
     const partCount = Math.ceil(file.size / upload.chunk_size);
     let nextPart = 0;
-    let uploadedBytes = 0;
     let failed = false;
     const uploadParts = async () => {
       while (!failed && nextPart < partCount) {
@@ -67,8 +69,7 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
         const body = file.slice(offset, offset + upload.chunk_size);
         try {
           await retryUploadRequest(`/uploads/${upload.id}/${part}`, { method: "PUT", body, headers: { "content-type": "application/octet-stream" } }, teamId);
-          uploadedBytes += body.size;
-          onProgress("Enviando arquivo…", Math.round(uploadedBytes / file.size * 15));
+          onProgress(UPLOADING_LABEL, 0);
         } catch (error) {
           failed = true;
           throw error;
@@ -86,14 +87,20 @@ export async function extract(file: File, mode: string, teamId: string, onProgre
     throw error;
   }
   let failures = 0;
+  // The work carries on server-side while we poll, so the bar never rewinds:
+  // a dropped poll changes the wording, not how far along the document is.
+  let percent = 0;
   while (true) {
-    let result: { status: string; error: string; artifacts: Artifact[]; progress: { message?: string; chunk?: number; total?: number } };
+    let result: { status: string; error: string; artifacts: Artifact[]; progress: ProgressUpdate };
     try { result = await api(`/documents/${jobId}`, "GET", undefined, teamId); failures = 0; }
-    catch (error) { if (++failures >= 5) throw error; onProgress("Reconectando… Seu documento continua no histórico.", 15); await new Promise(resolve => setTimeout(resolve, 2000)); continue; }
+    catch (error) { if (++failures >= 5) throw error; onProgress("Reconectando… Seu documento continua no histórico.", percent); await new Promise(resolve => setTimeout(resolve, 2000)); continue; }
     if (result.status === "done") return result.artifacts;
     if (result.status !== "processing") throw new Error(result.error ?? "Processamento interrompido. Confira o histórico.");
-    const value = result.progress;
-    onProgress(value.message ?? "Processando documento…", value.total ? 15 + Math.min(80, Math.round((value.chunk ?? 0) / value.total * 80)) : 15);
+    // No phase means the job has not reported anything yet, which is a document
+    // still waiting its turn - not one being worked on.
+    const value = result.progress ?? {};
+    percent = Math.max(percent, phasePercent(value) ?? 0);
+    onProgress(phaseLabel(value.phase) ?? PHASE_LABELS.queued, percent);
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
 }

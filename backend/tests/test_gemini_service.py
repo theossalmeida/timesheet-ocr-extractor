@@ -36,10 +36,11 @@ def configure_gemini(monkeypatch):
     monkeypatch.setattr(service.settings, "GEMINI_MODEL", "gemini-3.8-flash")
 
 
-def _mock_error_response(status: int, text: str = "error") -> MagicMock:
+def _mock_error_response(status: int, text: str = "error", headers: dict | None = None) -> MagicMock:
     response = MagicMock()
     response.status_code = status
     response.text = text
+    response.headers = headers or {}
     return response
 
 
@@ -62,7 +63,7 @@ def test_extract_success():
 
 
 def test_extract_raises_on_non_200():
-    mock_response = _mock_error_response(429, "rate limit")
+    mock_response = _mock_error_response(400, "bad request")
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(return_value=mock_response)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -71,6 +72,50 @@ def test_extract_raises_on_non_200():
     with patch("httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(GeminiExtractionError):
             asyncio.run(extract_with_gemini(b"fake"))
+
+    assert mock_client.post.await_count == 1, "a rejected request must not be retried"
+
+
+@pytest.mark.asyncio
+async def test_extract_retries_a_rate_limited_request(monkeypatch):
+    """429 is transient: concurrency high enough to hit it must back off."""
+
+    from services import gemini_service as service
+
+    slept = []
+    monkeypatch.setattr(service.asyncio, "sleep", AsyncMock(side_effect=slept.append))
+
+    data = [{"data": "01/03/2024", "marcacoes": ["08:00"], "ocorrencia_raw": None}]
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(
+        side_effect=[_mock_error_response(429, "quota", {"retry-after": "5"}), _mock_response(200, data)]
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        rows = await extract_with_gemini(b"fake pdf")
+
+    assert [row.data for row in rows] == ["01/03/2024"]
+    assert slept == [5.0], "Retry-After must be honoured"
+
+
+@pytest.mark.asyncio
+async def test_extract_gives_up_after_the_last_rate_limited_attempt(monkeypatch):
+    from services import gemini_service as service
+
+    monkeypatch.setattr(service.asyncio, "sleep", AsyncMock())
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=_mock_error_response(503, "overloaded"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(GeminiExtractionError):
+            await extract_with_gemini(b"fake")
+
+    assert mock_client.post.await_count == service.GEMINI_RETRIES
 
 
 def test_extract_wraps_timeout_as_gemini_error():
@@ -226,6 +271,8 @@ def test_gemini_url_uses_configured_model(monkeypatch):
 async def test_adaptive_chunks_overlap_with_bounded_concurrency_and_ordered_rows(monkeypatch):
     from services import ai_usage, gemini_service as service
 
+    monkeypatch.setattr(service.settings, "GEMINI_MAX_CONCURRENT_CHUNKS", 3)
+
     chunks = [bytes([index]) for index in range(7)]
     reader = MagicMock()
     reader.pages = [object()] * 14
@@ -251,7 +298,7 @@ async def test_adaptive_chunks_overlap_with_bounded_concurrency_and_ordered_rows
     with ai_usage.recording() as calls:
         rows = await service.extract_with_gemini_adaptive(b"pdf")
 
-    assert peak_active == service.GEMINI_MAX_CONCURRENT_CHUNKS
+    assert peak_active == 3
     assert completed != list(range(7))
     assert [row.data for row in rows] == [f"{index + 1:02d}/03/2024" for index in range(7)]
     assert len(calls) == 7
