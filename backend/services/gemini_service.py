@@ -68,7 +68,7 @@ Rules:
 - For a single-service form such as PAPELETA DE SERVICOS, GUIA MINISTERIAL, ordem de servico, viagem/linha service sheet, or similar, output at most ONE row for the page. Use the visible DATA field as data and the visible INICIO/TRABALHO and TERMINO/TRABALHO fields as marcacoes.
 - Work-start labels may appear as INICIO/TRABALHO, INICIO, ENTRADA, HORA INICIO, PEGADA, or SAIDA GARAGEM, ALWAYS CONSIDER THE EARLIER ONE WITH THOSE LABELS.
 - Work-end labels may appear as TERMINO/TRABALHO, TERMINO, SAIDA, HORA TERMINO, LARGADA, CHEGADA GARAGEM or CONTAS, ALWAYS CONSIDER THE LATEST ONE WITH THOSE LABELS.
-- If the page has a label/column for INTERVALO, INT., or INTER., you must collect all non-zero values in that column, sum them up (converting minutes to total duration if needed), and return the total sum as "HH:MM" (e.g., a total of 70 minutes must be returned as "01:10").
+- If the page/table has a column or field labeled INTERVALO, INT., or INTER., you must collect all non-zero interval values found across all trip rows/entries, sum them up as total minutes, and format the sum as HH:MM (e.g., if intervals are 6+6+6+6+5+6+1+8 = 44 minutes, return "00:44"). If no intervals are present, return null.
 - Ignore dates/times from signatures, electronic validation text, printed protocol text, QR codes, page numbers, addresses, phone numbers, totals, intervals, and footer/header metadata.
 - Do not infer sequential dates. Do not duplicate a single-service page into multiple days.
 - The number of work-start and work-end must match. If they do not match, return the earliest work-start with the latest work-end for each pair. For example, if a file has 2 work-start and 3 work-end we gonna consider the first pair and on the second we get the latest work-end.
