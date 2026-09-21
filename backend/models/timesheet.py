@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel
+from typing import Optional
 
 OcorrenciaTipo = Literal[
     "ferias",
@@ -20,6 +21,7 @@ OcorrenciaTipo = Literal[
 class TimesheetRow(BaseModel):
     data: str | None = None
     marcacoes: list[str] = []
+    intervalo: str | None = None
     ocorrencia_raw: str | None = None
     ocorrencia_tipo: OcorrenciaTipo | None = None
     worker_name: str | None = None
