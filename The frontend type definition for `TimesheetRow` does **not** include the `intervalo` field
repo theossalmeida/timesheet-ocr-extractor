@@ -1,0 +1,7 @@
+export interface TimesheetRow {
+  data: string | null;
+  marcacoes: string[];
+  ocorrencia_raw: string | null;
+  ocorrencia_tipo: OcorrenciaTipo | null;
+  // ← intervalo is missing here
+}

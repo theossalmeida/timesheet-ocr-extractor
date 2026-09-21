@@ -1,0 +1,3 @@
+class TimesheetRow(BaseModel):
+    ...
+    intervalo: str | None = None  # ← Already present

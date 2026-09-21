@@ -72,7 +72,7 @@ def _pdf_object_has_image(obj, depth: int = 0) -> bool:
     try:
         resources = resources.get_object() if hasattr(resources, "get_object") else resources
     except Exception:
-        resources = {}
+        return False
     xobjects = resources.get("/XObject") if isinstance(resources, dict) else None
     try:
         xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
@@ -91,7 +91,7 @@ def _pypdf_page_has_image(page) -> bool:
         return False
     xobjects = resources.get("/XObject") if isinstance(resources, dict) else None
     try:
-        xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
+        xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else resources
     except Exception:
         return False
     if not isinstance(xobjects, dict):
@@ -128,7 +128,7 @@ def _parse_text_rows(full_text: str) -> list[TimesheetRow]:
 def _parse_weekday_first_rows(full_text: str) -> list[TimesheetRow]:
     """Parse "Cartao de Ponto ES." rows, where the weekday comes before the
     date and the year is 2 digits, followed by Horario/Escala schedule codes
-    (ignored) and then every entrada/saida mark for the day:
+    (ignored) and then every entrada/saída mark for the day:
 
         Sab 02/01/21 00307 466 19:02 22:32 00:31 07:00 07:00 07:06 Hora Extra 00:06 ...
         Dom 03/01/21 466 FOLGA
@@ -297,6 +297,7 @@ def _detect_columns_by_header(table: list[list[str | None]]) -> dict[str, int | 
         entry_cols: list[int] = []
         exit_cols: list[int] = []
         occ_col: int | None = None
+        intervalo_col: int | None = None
 
         for i, cell in enumerate(cells):
             if not cell:
@@ -309,6 +310,8 @@ def _detect_columns_by_header(table: list[list[str | None]]) -> dict[str, int | 
                 exit_cols.append(i)
             elif _HDR_OCC_RE.search(cell) and occ_col is None:
                 occ_col = i
+            elif re.search(r"\bintervalo\b", cell, re.IGNORECASE) and intervalo_col is None:
+                intervalo_col = i
             # Columns matching _HDR_SKIP_TIME_RE are intentionally ignored
 
         if date_col is not None and (entry_cols or exit_cols):
@@ -319,6 +322,7 @@ def _detect_columns_by_header(table: list[list[str | None]]) -> dict[str, int | 
                 "entry2": entry_cols[1] if len(entry_cols) > 1 else None,
                 "exit2": exit_cols[1] if len(exit_cols) > 1 else None,
                 "occ": occ_col,
+                "intervalo": intervalo_col,
             }
     return None
 
@@ -412,11 +416,17 @@ def _structured_rows_from_tables(page_tables: list[list]) -> list[TimesheetRow]:
                     normalize_time(get(cols["entry2"]) or ""),
                     normalize_time(get(cols["exit2"]) or ""),
                 ) if t]
+
+                intervalo = get(cols.get("intervalo"))
+                if intervalo:
+                    intervalo = intervalo.strip()
+
                 all_rows.append(TimesheetRow(
                     data=normalized_date,
                     marcacoes=marcacoes,
                     ocorrencia_raw=occ_raw,
                     ocorrencia_tipo=occ_tipo,
+                    intervalo=intervalo,
                 ))
     return all_rows
 

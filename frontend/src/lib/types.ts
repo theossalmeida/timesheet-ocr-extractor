@@ -16,6 +16,7 @@ export interface TimesheetRow {
   marcacoes: string[];
   ocorrencia_raw: string | null;
   ocorrencia_tipo: OcorrenciaTipo | null;
+  intervalo: string | null;
 }
 
 export interface ExtractionResult {
