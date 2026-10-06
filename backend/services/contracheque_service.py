@@ -49,6 +49,9 @@ _DATE_RANGE_RE = re.compile(
 )
 _CDRJ_CODE_RE = re.compile(r"\d{1,6}")
 _BRL_NUMBER_RE = re.compile(r"[\d.]+,\d{2}")
+_FINANCIAL_RECORD_RE = re.compile(
+    r"^(\d{2}/\d{4})\s+(\d{4})\s+(.+?)\s+([\d.,]+)\s+(-?[\d.]+,\d{2})$"
+)
 
 
 # ── Currency helpers ──────────────────────────────────────────────────────────
@@ -256,6 +259,10 @@ def _extract_page_pdfplumber(page) -> dict | None:
 
     # 2. Extract salary items (and competência fallback) from plain text.
     text = page.extract_text() or ""
+    financial_records = _extract_financial_records(text)
+    if financial_records:
+        return financial_records[0]
+
     data = _extract_page_from_text(text, competencia=competencia)
     if data:
         return data
@@ -263,6 +270,42 @@ def _extract_page_pdfplumber(page) -> dict | None:
     # Coordinate-based fallback for CDRJ payslips with obfuscated line
     # endings and no extractable table headings.
     return _extract_page_cdrj_layout(page, text)
+
+
+def _extract_financial_records(text: str) -> list[dict]:
+    """Extract monthly items from Petrobras financial-history statements."""
+    grouped: dict[str, dict[str, float]] = {}
+    expanded_codes: set[tuple[str, str]] = set()
+    records: list[tuple[str, str, str, float, bool]] = []
+
+    for line in (text or "").splitlines():
+        match = _FINANCIAL_RECORD_RE.match(line.strip())
+        if not match:
+            continue
+
+        competencia, code, raw_description, _quantity, raw_value = match.groups()
+        description = raw_description.strip()
+        # Technical rows include organization and indicator numbers before the
+        # abbreviated label; expanded rows carry the readable description.
+        technical = bool(re.match(r"^\d+\s+\d+\s+", description))
+        if technical:
+            description = re.sub(r"^\d+\s+\d+\s+", "", description).strip()
+        value = _parse_currency(raw_value)
+        if not description or value is None:
+            continue
+        records.append((competencia, code, description, value, technical))
+        if not technical:
+            expanded_codes.add((competencia, code))
+
+    for competencia, code, description, value, technical in records:
+        if technical and (competencia, code) in expanded_codes:
+            continue
+        grouped.setdefault(competencia, {})[description] = value
+
+    return [
+        {"competencia": competencia, "itens": [{"descricao": desc, "valor": value} for desc, value in items.items()]}
+        for competencia, items in grouped.items()
+    ]
 
 
 def _extract_all_pdfplumber(
@@ -280,6 +323,15 @@ def _extract_all_pdfplumber(
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, page in enumerate(pdf.pages):
             try:
+                text = page.extract_text() or ""
+                financial_records = _extract_financial_records(text)
+                if financial_records:
+                    results.extend(financial_records)
+                    logger.info(
+                        "contracheque: financial statement OK — page %d  months=%d",
+                        i, len(financial_records),
+                    )
+                    continue
                 data = _extract_page_pdfplumber(page)
             except Exception as e:
                 logger.warning("contracheque: pdfplumber error on page %d — %s", i, e)
