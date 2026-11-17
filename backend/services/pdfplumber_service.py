@@ -10,6 +10,7 @@ import pypdf
 logger = logging.getLogger(__name__)
 
 from models.timesheet import TimesheetRow
+from services.frequency_report_parser import is_frequency_report, parse_frequency_report
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia, _PT_MONTHS
 
 _DATE_RE = re.compile(r"\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}")
@@ -498,12 +499,19 @@ def _analyze_pdfplumber(
         pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
         logger.info("pdfplumber: opened PDF — pages=%d", len(pdf.pages))
 
-        page_tables: list[list] = []
         page_text: dict[int, str] = {}
-        for page in pdf.pages:
-            page_tables.append(page.extract_tables())
+        table_cache: dict[int, list] = {}
 
-        if need_rows:
+        def tables_of(index: int) -> list:
+            if index not in table_cache:
+                table_cache[index] = pdf.pages[index].extract_tables()
+            return table_cache[index]
+
+        report_rows = parse_frequency_report(pdf) if need_rows and is_frequency_report(pdf) else []
+        if report_rows:
+            rows = report_rows
+        elif need_rows:
+            page_tables = [tables_of(i) for i in range(len(pdf.pages))]
             all_rows = _structured_rows_from_tables(page_tables)
             logger.info("pdfplumber: structured table — rows=%d", len(all_rows))
             if all_rows:
@@ -533,7 +541,7 @@ def _analyze_pdfplumber(
                 text = page_text.get(i)
                 if text is None:
                     text = page.extract_text() or ""
-                if _is_scanned_page(text, page_tables[i]):
+                if _is_scanned_page(text, tables_of(i)):
                     scanned_indices.append(i)
 
             if scanned_indices and reader is not None:
