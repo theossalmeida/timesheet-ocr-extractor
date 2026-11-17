@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, Callable
 
-import httpx
+import anthropic
 import pypdf
 
 logger = logging.getLogger(__name__)
@@ -15,45 +15,34 @@ logger = logging.getLogger(__name__)
 from config import settings
 from models.timesheet import TimesheetRow
 from services import ai_usage
-from utils.http_client import ensure_async_client
 from utils.normalizers import normalize_date, normalize_time, normalize_ocorrencia
 
-GEMINI_PAGE_CHUNK_SIZE = 2
-GEMINI_TIMEOUT_SECONDS = 180.0
-GEMINI_RETRIES = 2
-# Statuses worth retrying: the quota and overload responses are transient, and
-# concurrency high enough to hit them must back off rather than drop the chunk.
-GEMINI_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+CLAUDE_PAGE_CHUNK_SIZE = 2
+CLAUDE_TIMEOUT_SECONDS = 180.0
+# The SDK retries 408/409/429/5xx and connection errors with backoff, honouring
+# Retry-After, so quota and overload responses never drop a chunk on first hit.
+CLAUDE_MAX_RETRIES = 2
+CLAUDE_MAX_OUTPUT_TOKENS = 16000
 
 
 def _max_concurrent_chunks() -> int:
-    return max(1, settings.GEMINI_MAX_CONCURRENT_CHUNKS)
+    return max(1, settings.ANTHROPIC_MAX_CONCURRENT_CHUNKS)
 
 
-def _connection_limits() -> httpx.Limits:
-    """Sockets to match the concurrency, so the pool is not the new bottleneck."""
-    allowed = _max_concurrent_chunks()
-    return httpx.Limits(max_connections=allowed, max_keepalive_connections=allowed)
+def is_claude_configured() -> bool:
+    return bool((settings.ANTHROPIC_API_KEY or "").strip())
 
 
-def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
-    """Honour Retry-After when the quota response carries one, else back off."""
-    try:
-        return min(60.0, max(0.0, float(response.headers.get("retry-after", ""))))
-    except (TypeError, ValueError):
-        return 2.0 * attempt
+def _claude_model() -> str:
+    return (settings.ANTHROPIC_MODEL or "claude-haiku-5-5").strip()
 
 
-def is_gemini_configured() -> bool:
-    return bool((settings.GEMINI_API_KEY or "").strip())
-
-
-def _gemini_model() -> str:
-    return (settings.GEMINI_MODEL or "gemini-3.8-flash").strip()
-
-
-def _gemini_url() -> str:
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model()}:generateContent"
+def _new_client() -> anthropic.AsyncAnthropic:
+    return anthropic.AsyncAnthropic(
+        api_key=settings.ANTHROPIC_API_KEY,
+        timeout=CLAUDE_TIMEOUT_SECONDS,
+        max_retries=CLAUDE_MAX_RETRIES,
+    )
 
 
 EXTRACTION_PROMPT = """You are a timesheet data extractor for Brazilian labor documents.
@@ -87,13 +76,41 @@ OCR TEXT:
 """
 
 
-class GeminiExtractionError(Exception):
+class ClaudeExtractionError(Exception):
     pass
 
 
-def _record_uncertain_request(error: httpx.RequestError, kind: str) -> None:
-    if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
-        ai_usage.record('gemini', _gemini_model(), kind, None)
+async def _complete(
+    client: anthropic.AsyncAnthropic, content: list[dict], kind: str
+) -> list[TimesheetRow]:
+    """Send one request, meter it, then parse it.
+
+    Metering comes first: Anthropic bills a completed call whether or not its
+    answer turns out to be parseable, so a discarded response still has to
+    reach the cost ledger.
+    """
+    model = _claude_model()
+    try:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=CLAUDE_MAX_OUTPUT_TOKENS,
+            output_config={"effort": "low"},
+            messages=[{"role": "user", "content": content}],
+        )
+    except anthropic.APITimeoutError as error:
+        ai_usage.record("claude", model, kind, None)
+        raise ClaudeExtractionError(f"Claude request timed out: {error}") from error
+    except anthropic.APIConnectionError as error:
+        raise ClaudeExtractionError(f"Claude request failed: {error}") from error
+    except anthropic.APIStatusError as error:
+        logger.error("Claude API error - status=%d body=%s", error.status_code, str(error)[:300])
+        raise ClaudeExtractionError(f"Claude API error {error.status_code}: {str(error)[:300]}") from error
+
+    ai_usage.record("claude", model, kind, ai_usage.usage_from_claude(response.usage))
+    if response.stop_reason == "refusal":
+        raise ClaudeExtractionError("Claude declined the request")
+    payload = _loads_claude_json(_extract_response_text(response))
+    return _rows_from_payload(payload)
 
 
 def _clean_json(text: str) -> str:
@@ -103,20 +120,14 @@ def _clean_json(text: str) -> str:
     return text.strip()
 
 
-def _extract_response_text(response_json: dict) -> str:
-    try:
-        parts = response_json["candidates"][0]["content"]["parts"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise GeminiExtractionError(f"Unexpected Gemini response structure: {e}") from e
-
-    text_parts = [part.get("text", "") for part in parts if isinstance(part, dict)]
-    text = "".join(text_parts).strip()
+def _extract_response_text(response: Any) -> str:
+    text = "".join(block.text for block in response.content if block.type == "text").strip()
     if not text:
-        raise GeminiExtractionError("Gemini returned an empty response")
+        raise ClaudeExtractionError("Claude returned an empty response")
     return text
 
 
-def _loads_gemini_json(text: str) -> Any:
+def _loads_claude_json(text: str) -> Any:
     text = _clean_json(text)
     try:
         return json.loads(text)
@@ -127,7 +138,7 @@ def _loads_gemini_json(text: str) -> Any:
                 return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
-        raise GeminiExtractionError(f"Failed to parse Gemini response: {e}") from e
+        raise ClaudeExtractionError(f"Failed to parse Claude response: {e}") from e
 
 
 def _confidence_label(raw: dict[str, Any]) -> str | None:
@@ -201,91 +212,32 @@ def _rows_from_payload(payload: Any) -> list[TimesheetRow]:
     return rows
 
 
-def _parse_gemini_response(response_json: dict, kind: str) -> list[TimesheetRow]:
-    """Meter the call, then parse it.
-
-    Metering comes first: Google bills a completed call whether or not its
-    answer turns out to be parseable, so a discarded response still has to
-    reach the cost ledger.
-    """
-    ai_usage.record("gemini", _gemini_model(), kind, ai_usage.usage_from_gemini(response_json))
-    payload = _loads_gemini_json(_extract_response_text(response_json))
-    return _rows_from_payload(payload)
-
-
-async def extract_with_gemini(
-    pdf_bytes: bytes, *, client: httpx.AsyncClient | None = None
+async def extract_with_claude(
+    pdf_bytes: bytes, *, client: anthropic.AsyncAnthropic | None = None
 ) -> list[TimesheetRow]:
-    if not is_gemini_configured():
+    if not is_claude_configured():
         return []
 
     logger.info(
-        "Calling Gemini extract API - model=%s pdf_size=%d bytes",
-        settings.GEMINI_MODEL,
+        "Calling Claude extract API - model=%s pdf_size=%d bytes",
+        _claude_model(),
         len(pdf_bytes),
     )
-    encoded = base64.b64encode(pdf_bytes).decode("utf-8")
-    body = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
-                {"text": EXTRACTION_PROMPT},
-            ]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingLevel": "low"},
-            "maxOutputTokens": 8192,
+    content = [
+        {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(pdf_bytes).decode("utf-8"),
+            },
         },
-    }
-    response = None
-    for attempt in range(1, GEMINI_RETRIES + 1):
-        try:
-            timeout = httpx.Timeout(GEMINI_TIMEOUT_SECONDS)
-            async with ensure_async_client(client, timeout) as active_client:
-                response = await active_client.post(
-                    _gemini_url(),
-                    params={"key": settings.GEMINI_API_KEY},
-                    json=body,
-                )
-        except (httpx.TimeoutException, httpx.RequestError) as e:
-            _record_uncertain_request(e, 'extract')
-            if attempt >= GEMINI_RETRIES:
-                raise GeminiExtractionError(
-                    f"Gemini request failed after {attempt} attempt(s): {e}"
-                ) from e
-            logger.warning(
-                "Gemini request failed on attempt %d/%d: %s",
-                attempt,
-                GEMINI_RETRIES,
-                e,
-            )
-            await asyncio.sleep(2 * attempt)
-            continue
-
-        if response.status_code in GEMINI_RETRY_STATUSES and attempt < GEMINI_RETRIES:
-            logger.warning(
-                "Gemini returned %d on attempt %d/%d; backing off",
-                response.status_code,
-                attempt,
-                GEMINI_RETRIES,
-            )
-            await asyncio.sleep(_retry_after_seconds(response, attempt))
-            continue
-        break
-
-    if response is None:
-        raise GeminiExtractionError("Gemini request did not return a response")
-    if response.status_code != 200:
-        logger.error(
-            "Gemini API error - status=%d body=%s",
-            response.status_code,
-            response.text[:300],
-        )
-        raise GeminiExtractionError(
-            f"Gemini API error {response.status_code}: {response.text[:300]}"
-        )
-    return _parse_gemini_response(response.json(), "extract")
+        {"type": "text", "text": EXTRACTION_PROMPT},
+    ]
+    if client is not None:
+        return await _complete(client, content, "extract")
+    async with _new_client() as own_client:
+        return await _complete(own_client, content, "extract")
 
 
 def _split_pdf_into_chunks(
@@ -306,9 +258,9 @@ def _split_pdf_into_chunks(
     return chunks
 
 
-async def extract_with_gemini_adaptive(
+async def extract_with_claude_adaptive(
     pdf_bytes: bytes,
-    chunk_size: int = GEMINI_PAGE_CHUNK_SIZE,
+    chunk_size: int = CLAUDE_PAGE_CHUNK_SIZE,
     semaphore: asyncio.Semaphore | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> list[TimesheetRow]:
@@ -321,7 +273,7 @@ async def extract_with_gemini_adaptive(
     `on_progress(done, total)` fires as each chunk finishes, so a caller
     streaming to a browser can report real progress instead of a guess.
     """
-    if not is_gemini_configured():
+    if not is_claude_configured():
         return []
     if chunk_size < 1:
         raise ValueError("chunk_size must be positive")
@@ -337,41 +289,41 @@ async def extract_with_gemini_adaptive(
         page_count = len(reader.pages)
     except Exception:
         async with semaphore:
-            rows = await extract_with_gemini(pdf_bytes)
+            rows = await extract_with_claude(pdf_bytes)
         report(1, 1)
         return rows
 
     if page_count <= chunk_size:
         async with semaphore:
-            rows = await extract_with_gemini(pdf_bytes)
+            rows = await extract_with_claude(pdf_bytes)
         report(1, 1)
         return rows
 
     async def extract_chunk(
-        chunk: bytes, client: httpx.AsyncClient
-    ) -> tuple[list[TimesheetRow], GeminiExtractionError | None]:
+        chunk: bytes, client: anthropic.AsyncAnthropic
+    ) -> tuple[list[TimesheetRow], ClaudeExtractionError | None]:
         async with semaphore:
             try:
-                return await extract_with_gemini(chunk, client=client), None
-            except GeminiExtractionError as error:
+                return await extract_with_claude(chunk, client=client), None
+            except ClaudeExtractionError as error:
                 last_error = error
-                logger.warning("Gemini chunk failed; retrying as single pages: %s", error)
+                logger.warning("Claude chunk failed; retrying as single pages: %s", error)
 
             page_chunks = await asyncio.to_thread(_split_pdf_into_chunks, chunk, 1)
             chunk_rows: list[TimesheetRow] = []
             for page_chunk in page_chunks:
                 try:
-                    chunk_rows.extend(await extract_with_gemini(page_chunk, client=client))
-                except GeminiExtractionError as error:
+                    chunk_rows.extend(await extract_with_claude(page_chunk, client=client))
+                except ClaudeExtractionError as error:
                     last_error = error
-                    logger.warning("Gemini single-page fallback failed: %s", error)
+                    logger.warning("Claude single-page fallback failed: %s", error)
             return chunk_rows, last_error
 
     chunks = await asyncio.to_thread(_split_pdf_into_chunks, pdf_bytes, chunk_size, reader=reader)
     finished = 0
     report(finished, len(chunks))
 
-    async def extract_and_report(chunk: bytes, client: httpx.AsyncClient):
+    async def extract_and_report(chunk: bytes, client: anthropic.AsyncAnthropic):
         nonlocal finished
         try:
             return await extract_chunk(chunk, client)
@@ -379,15 +331,13 @@ async def extract_with_gemini_adaptive(
             finished += 1
             report(finished, len(chunks))
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(GEMINI_TIMEOUT_SECONDS), limits=_connection_limits()
-    ) as client:
+    async with _new_client() as client:
         results = await asyncio.gather(
             *(extract_and_report(chunk, client) for chunk in chunks),
             return_exceptions=True,
         )
     rows: list[TimesheetRow] = []
-    last_error: GeminiExtractionError | None = None
+    last_error: ClaudeExtractionError | None = None
     for result in results:
         if isinstance(result, BaseException):
             raise result
@@ -403,38 +353,11 @@ async def extract_with_gemini_adaptive(
     return []
 
 
-async def normalize_text_with_gemini(ocr_text: str) -> list[TimesheetRow]:
-    if not is_gemini_configured():
+async def normalize_text_with_claude(ocr_text: str) -> list[TimesheetRow]:
+    if not is_claude_configured():
         return []
 
-    logger.info("Calling Gemini normalize API - text_len=%d chars", len(ocr_text))
-    body = {
-        "contents": [{
-            "parts": [{"text": NORMALIZE_PROMPT + ocr_text}]
-        }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingLevel": "low"},
-            "maxOutputTokens": 8192,
-        },
-    }
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-            response = await client.post(
-                _gemini_url(),
-                params={"key": settings.GEMINI_API_KEY},
-                json=body,
-            )
-    except httpx.RequestError as error:
-        _record_uncertain_request(error, 'normalize')
-        raise
-    if response.status_code != 200:
-        logger.error(
-            "Gemini normalization error - status=%d body=%s",
-            response.status_code,
-            response.text[:300],
-        )
-        raise GeminiExtractionError(
-            f"Gemini normalization error {response.status_code}: {response.text[:300]}"
-        )
-    return _parse_gemini_response(response.json(), "normalize")
+    logger.info("Calling Claude normalize API - text_len=%d chars", len(ocr_text))
+    content = [{"type": "text", "text": NORMALIZE_PROMPT + ocr_text}]
+    async with _new_client() as client:
+        return await _complete(client, content, "normalize")

@@ -30,10 +30,10 @@ from services.contracheque_service import stream_contracheque_extraction
 from services.frequency_cycle_service import (
     stream_frequency_cycle_extraction,
 )
-from services.gemini_service import (
-    GeminiExtractionError,
-    extract_with_gemini_adaptive,
-    is_gemini_configured,
+from services.claude_service import (
+    ClaudeExtractionError,
+    extract_with_claude_adaptive,
+    is_claude_configured,
 )
 from services.guia_ministerial_service import stream_guia_extraction
 from services.local_vision_ocr_service import (
@@ -157,24 +157,24 @@ def _run_tesseract_timesheet(pdf_bytes: bytes) -> list:
 
 
 
-async def _run_gemini_timesheet(scanned_pdf_bytes: bytes | None, on_progress=None) -> list:
-    """Run Gemini only for scanned/image-only PDF pages."""
+async def _run_claude_timesheet(scanned_pdf_bytes: bytes | None, on_progress=None) -> list:
+    """Run Claude only for scanned/image-only PDF pages."""
     if not scanned_pdf_bytes:
-        logger.debug("Gemini OCR skipped: no scanned/image-only pages")
+        logger.debug("Claude OCR skipped: no scanned/image-only pages")
         return []
-    if not is_gemini_configured():
-        logger.debug("Gemini OCR is not configured, skipping")
+    if not is_claude_configured():
+        logger.debug("Claude OCR is not configured, skipping")
         return []
     try:
-        rows = await extract_with_gemini_adaptive(scanned_pdf_bytes, on_progress=on_progress)
+        rows = await extract_with_claude_adaptive(scanned_pdf_bytes, on_progress=on_progress)
         if rows:
-            logger.info("Gemini OCR extracted %d row(s)", len(rows))
+            logger.info("Claude OCR extracted %d row(s)", len(rows))
         return rows
-    except GeminiExtractionError as e:
-        logger.warning("Gemini OCR failed: %s", e)
+    except ClaudeExtractionError as e:
+        logger.warning("Claude OCR failed: %s", e)
         return []
     except Exception as e:
-        logger.warning("Gemini OCR raised unexpected error: %s", e)
+        logger.warning("Claude OCR raised unexpected error: %s", e)
         return []
 
 async def _run_local_vision_timesheet(pdf_bytes: bytes | None) -> list:
@@ -209,7 +209,7 @@ async def _run_pipeline(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionR
     """Run the extraction pipeline, metering the paid AI calls it makes.
 
     Returns (result, provider, ai_calls), where ai_calls is one entry per
-    Gemini HTTP call - chunk calls, single-page retries and calls whose answer
+    Claude HTTP call - chunk calls, single-page retries and calls whose answer
     was discarded included, since Google bills all of them. The ledger is what
     the document cost is computed from (documents.finish_extraction).
     """
@@ -219,10 +219,10 @@ async def _run_pipeline(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionR
 
 
 async def _extract_rows(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionResult, str]:
-    """Run extraction pipeline: pdfplumber -> Tesseract -> Gemini/local vision OCR. Returns (result, provider).
+    """Run extraction pipeline: pdfplumber -> Tesseract -> Claude/local vision OCR. Returns (result, provider).
 
     Tesseract runs locally over rendered page images for anything pdfplumber
-    could not read. Gemini is used only for scanned/image-only PDF pages
+    could not read. Claude is used only for scanned/image-only PDF pages
     after local extraction fails.
     """
     pdf_type = await asyncio.to_thread(detect_pdf_type, pdf_bytes)
@@ -251,11 +251,11 @@ async def _extract_rows(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionR
                 rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
                 logger.info("Hybrid merge - total rows=%d", len(rows))
             else:
-                extra_rows = await _run_gemini_timesheet(scanned_bytes, on_progress)
+                extra_rows = await _run_claude_timesheet(scanned_bytes, on_progress)
                 if extra_rows:
-                    provider = "pdfplumber+gemini"
+                    provider = "pdfplumber+claude"
                     rows = sorted(rows + extra_rows, key=lambda r: _sort_key(r.data))
-                    logger.info("Hybrid Gemini merge - total rows=%d", len(rows))
+                    logger.info("Hybrid Claude merge - total rows=%d", len(rows))
                 else:
                     extra_rows = await _run_local_vision_timesheet(scanned_bytes)
                     if extra_rows:
@@ -270,9 +270,9 @@ async def _extract_rows(pdf_bytes: bytes, on_progress=None) -> tuple[ExtractionR
         if rows:
             provider = "tesseract"
         else:
-            rows = await _run_gemini_timesheet(scanned_bytes, on_progress)
+            rows = await _run_claude_timesheet(scanned_bytes, on_progress)
             if rows:
-                provider = "gemini"
+                provider = "claude"
             else:
                 rows = await _run_local_vision_timesheet(scanned_bytes)
                 if rows:
@@ -339,7 +339,7 @@ async def stream_timesheet_extraction(pdf_bytes: bytes, original_stem: str):
     yield progress_frame(progress_phases.PROCESSING, "Processando arquivo...", 0, 1, step="extracting")
     # Wait on the next update and on the pipeline itself: waiting on the queue
     # alone would hold the stream open for the whole timeout after the pipeline
-    # has already finished, which is every run that never reaches Gemini.
+    # has already finished, which is every run that never reaches Claude.
     pending_update: asyncio.Task | None = None
     try:
         while not task.done():

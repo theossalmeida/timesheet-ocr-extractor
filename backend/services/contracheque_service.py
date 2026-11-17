@@ -315,7 +315,7 @@ def _extract_all_pdfplumber(
     Run pdfplumber on every page.
     Returns:
       - results: list of successfully extracted page dicts
-      - failed_indices: 0-based page indices that need Gemini fallback
+      - failed_indices: 0-based page indices that need Claude fallback
     """
     results: list[dict] = []
     failed: list[int] = []
@@ -482,7 +482,7 @@ async def stream_contracheque_extraction(
 
     Pipeline:
       1. Try pdfplumber on every page (fast, no API cost)
-      2. For pages pdfplumber could not parse, fall back to Gemini
+      2. For pages pdfplumber could not parse, fall back to Claude
       3. Aggregate and build Excel
     """
     import json as _json

@@ -26,7 +26,7 @@ PROCESSING = "processing"
 BUILDING = "building"
 
 # One wording per phase, whatever the pipeline underneath. The stage names the
-# pipeline actually went through (pdfplumber, tesseract, gemini) stay in `step`
+# pipeline actually went through (pdfplumber, tesseract, claude) stay in `step`
 # and in the logs: they mean nothing to the person watching the bar.
 QUEUED_LABEL = "Aguardando processamento..."
 DETECTING_LABEL = "Identificando melhor abordagem..."

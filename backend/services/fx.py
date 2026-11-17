@@ -1,6 +1,6 @@
 """USD -> BRL conversion for AI usage costs.
 
-Gemini is billed in dollars and the history panel shows reais, so every priced
+Claude is billed in dollars and the history panel shows reais, so every priced
 call is converted with the rate of the day it ran. The rate is fetched at most
 once a day, and the value used is frozen onto the ai_usage row so historical
 costs never change under a later rate.

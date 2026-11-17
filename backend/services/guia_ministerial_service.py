@@ -18,8 +18,8 @@ from utils.normalizers import normalize_date, normalize_time
 # That also makes the page the unit of work, so progress counts pages - the
 # thing the person watching actually recognises - and the bar moves one page at
 # a time instead of jumping a whole block.
-GEMINI_PAGES_PER_REQUEST = 1
-CHUNK_SIZE = GEMINI_PAGES_PER_REQUEST
+CLAUDE_PAGES_PER_REQUEST = 1
+CHUNK_SIZE = CLAUDE_PAGES_PER_REQUEST
 
 # Guia Ministerial / Papeleta de Servico Externo forms are filled in by hand.
 # The only machine-readable text on a scanned guia is usually the electronic
@@ -30,7 +30,7 @@ CHUNK_SIZE = GEMINI_PAGES_PER_REQUEST
 #
 # A local model reads a short probe first. Only if it grades that probe highly
 # does the rest of the document stay local; otherwise the whole document goes
-# to Gemini, and single pages the local model cannot read go to Gemini too.
+# to Claude, and single pages the local model cannot read go to Claude too.
 
 
 class GuiaExtractionError(Exception):
@@ -93,18 +93,18 @@ def _record_from_row(row: TimesheetRow) -> dict:
     }
 
 
-def _gemini_semaphore() -> asyncio.Semaphore:
-    """One Gemini concurrency budget, shared by every chunk of a document.
+def _claude_semaphore() -> asyncio.Semaphore:
+    """One Claude concurrency budget, shared by every chunk of a document.
 
     Chunks run concurrently, and each one fans out internally, so without a
     shared budget the in-flight request count would be the product of the two.
     """
-    from services.gemini_service import _max_concurrent_chunks
+    from services.claude_service import _max_concurrent_chunks
 
     return asyncio.Semaphore(_max_concurrent_chunks())
 
 
-async def _process_chunk_gemini(
+async def _process_chunk_claude(
     chunk_bytes: bytes, semaphore: asyncio.Semaphore | None = None
 ) -> list[dict]:
     """Paid vision fallback for pages Tesseract cannot read.
@@ -114,29 +114,29 @@ async def _process_chunk_gemini(
     prompt already covers single-service forms (GUIA MINISTERIAL, PAPELETA DE
     SERVICOS), and every call it makes is metered by services/ai_usage.py.
     """
-    from services.gemini_service import (
-        GeminiExtractionError,
-        extract_with_gemini_adaptive,
-        is_gemini_configured,
+    from services.claude_service import (
+        ClaudeExtractionError,
+        extract_with_claude_adaptive,
+        is_claude_configured,
     )
 
-    if not is_gemini_configured():
-        logger.debug("guia: Gemini is not configured, skipping")
+    if not is_claude_configured():
+        logger.debug("guia: Claude is not configured, skipping")
         return []
 
     try:
-        rows = await extract_with_gemini_adaptive(
-            chunk_bytes, chunk_size=GEMINI_PAGES_PER_REQUEST, semaphore=semaphore
+        rows = await extract_with_claude_adaptive(
+            chunk_bytes, chunk_size=CLAUDE_PAGES_PER_REQUEST, semaphore=semaphore
         )
-    except GeminiExtractionError as e:
-        logger.warning("guia: Gemini OCR failed: %s", e)
+    except ClaudeExtractionError as e:
+        logger.warning("guia: Claude OCR failed: %s", e)
         return []
     except Exception as e:
-        logger.warning("guia: Gemini OCR raised unexpected error: %s", e)
+        logger.warning("guia: Claude OCR raised unexpected error: %s", e)
         return []
 
     if rows:
-        logger.info("guia: Gemini OCR read %d record(s)", len(rows))
+        logger.info("guia: Claude OCR read %d record(s)", len(rows))
     return [_record_from_row(row) for row in rows]
 
 
@@ -185,19 +185,19 @@ def _aggregate(records: list[dict]) -> list[TimesheetRow]:
     return rows
 
 
-async def _gemini_page_retry(
+async def _claude_page_retry(
     pdf_bytes: bytes, page_number: int, semaphore: asyncio.Semaphore
 ) -> list[dict]:
     """Re-read one page the local model could not, splitting it off-thread."""
     page_pdf = await asyncio.to_thread(_single_page_pdf, pdf_bytes, page_number)
-    return await _process_chunk_gemini(page_pdf, semaphore)
+    return await _process_chunk_claude(page_pdf, semaphore)
 
 
-async def _gemini_whole_document(pdf_bytes: bytes, chunk_size: int) -> list[dict]:
-    semaphore = _gemini_semaphore()
+async def _claude_whole_document(pdf_bytes: bytes, chunk_size: int) -> list[dict]:
+    semaphore = _claude_semaphore()
     chunks = await asyncio.to_thread(_split_pdf_chunks, pdf_bytes, chunk_size)
     results = await asyncio.gather(
-        *(_process_chunk_gemini(chunk, semaphore) for chunk in chunks)
+        *(_process_chunk_claude(chunk, semaphore) for chunk in chunks)
     )
     return [record for chunk_records in results for record in chunk_records]
 
@@ -278,31 +278,31 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                         retry_pages.append(outcome.page_number)
 
                 if retry_pages:
-                    semaphore = _gemini_semaphore()
+                    semaphore = _claude_semaphore()
                     async for item in drain_parallel(
-                        [_gemini_page_retry(pdf_bytes, page, semaphore) for page in retry_pages],
-                        "gemini",
+                        [_claude_page_retry(pdf_bytes, page, semaphore) for page in retry_pages],
+                        "claude",
                     ):
                         if isinstance(item, str):
                             yield item
                         else:
-                            if item and "gemini-guia" not in used:
-                                used.append("gemini-guia")
+                            if item and "claude-guia" not in used:
+                                used.append("claude-guia")
                             all_records.extend(item)
             else:
                 reason = run.reason if run is not None else "IA local indisponivel"
-                logger.info("guia: local reading rejected (%s); using Gemini", reason)
-                semaphore = _gemini_semaphore()
+                logger.info("guia: local reading rejected (%s); using Claude", reason)
+                semaphore = _claude_semaphore()
                 chunks = await asyncio.to_thread(_split_pdf_chunks, pdf_bytes, chunk_size)
                 async for item in drain_parallel(
-                    [_process_chunk_gemini(chunk, semaphore) for chunk in chunks],
-                    "gemini",
+                    [_process_chunk_claude(chunk, semaphore) for chunk in chunks],
+                    "claude",
                 ):
                     if isinstance(item, str):
                         yield item
                     else:
-                        if item and "gemini-guia" not in used:
-                            used.append("gemini-guia")
+                        if item and "claude-guia" not in used:
+                            used.append("claude-guia")
                         all_records.extend(item)
 
             rows = _aggregate(all_records)
@@ -325,7 +325,7 @@ async def stream_guia_extraction(pdf_bytes: bytes, original_stem: str, chunk_siz
                 "csv_filename": f"pjecalc_{original_stem}.{csv_ext}",
                 "csv_mime": csv_mime,
                 "rows_extracted": len(rows),
-                "provider": "+".join(used) or "gemini-guia",
+                "provider": "+".join(used) or "claude-guia",
                 "ai_usage": list(ai_calls),
             }, ensure_ascii=False) + "\n\n"
 
@@ -355,18 +355,18 @@ async def extract_with_guia_ministerial(
 
         if retry_pages:
             logger.info(
-                "guia: %d page(s) unreadable locally; retrying them with Gemini - pages %s",
+                "guia: %d page(s) unreadable locally; retrying them with Claude - pages %s",
                 len(retry_pages), retry_pages,
             )
-            semaphore = _gemini_semaphore()
+            semaphore = _claude_semaphore()
             retried = await asyncio.gather(
-                *(_gemini_page_retry(pdf_bytes, page, semaphore) for page in retry_pages)
+                *(_claude_page_retry(pdf_bytes, page, semaphore) for page in retry_pages)
             )
             records.extend(record for page_records in retried for record in page_records)
     else:
         reason = run.reason if run is not None else "local vision OCR unavailable"
-        logger.info("guia: local reading rejected (%s); using Gemini", reason)
-        records = await _gemini_whole_document(pdf_bytes, chunk_size)
+        logger.info("guia: local reading rejected (%s); using Claude", reason)
+        records = await _claude_whole_document(pdf_bytes, chunk_size)
 
     rows = _aggregate(records)
     logger.info("guia: done - total_rows=%d", len(rows))

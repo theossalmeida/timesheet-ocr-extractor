@@ -60,14 +60,14 @@ def test_failed_generation_discards_the_run(owner):
 
 
 def _done_event(ai_usage):
-    return 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKspreadsheet').decode(),'excel_filename':'result.xlsx','provider':'gemini','rows_extracted':4,'ai_usage':ai_usage})+'\n\n'
+    return 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKspreadsheet').decode(),'excel_filename':'result.xlsx','provider':'claude','rows_extracted':4,'ai_usage':ai_usage})+'\n\n'
 
 
 def _call(**overrides):
-    return {'provider':'gemini','model':'gemini-3.8-flash','kind':'extract','metered':True,'prompt_tokens':1000,'cached_tokens':0,'output_tokens':500,'thought_tokens':100,'total_tokens':1600,**overrides}
+    return {'provider':'claude','model':'claude-haiku-5-5','kind':'extract','metered':True,'prompt_tokens':1000,'cached_tokens':0,'output_tokens':500,'thought_tokens':100,'total_tokens':1600,**overrides}
 
 
-def test_gemini_document_costs_the_sum_of_its_calls(owner, monkeypatch):
+def test_claude_document_costs_the_sum_of_its_calls(owner, monkeypatch):
     app.state.limiter._limiter.storage.reset()
     monkeypatch.setattr('services.fx.usd_brl',lambda: 5.0)
 
@@ -84,13 +84,13 @@ def test_gemini_document_costs_the_sum_of_its_calls(owner, monkeypatch):
     assert [row['kind'] for row in rows] == ['extract','normalize']
     assert [row['prompt_tokens'] for row in rows] == [1000,2000]
     assert [row['output_tokens'] for row in rows] == [500,0]
-    # 1000 input + 500 output tokens at $2/$12 per 1M, then 2000 input tokens.
-    assert float(rows[0]['cost_usd']) == pytest.approx(0.008)
-    assert float(rows[1]['cost_usd']) == pytest.approx(0.004)
+    # 1000 input + 500 output tokens at $0.10/$0.50 per 1M, then 2000 input tokens.
+    assert float(rows[0]['cost_usd']) == pytest.approx(0.00035)
+    assert float(rows[1]['cost_usd']) == pytest.approx(0.0002)
     assert [float(row['usd_brl_rate']) for row in rows] == [5.0,5.0]
 
     document = owner.get('/documents',params={'q':'metered.pdf'}).json()['documents'][0]
-    assert float(document['cost_brl']) == pytest.approx(0.012*5.0)
+    assert float(document['cost_brl']) == pytest.approx(0.00055*5.0)
 
 
 def test_unpriceable_call_leaves_the_cost_unknown(owner, monkeypatch):
@@ -166,7 +166,7 @@ def test_local_only_document_costs_zero_even_for_an_ai_named_provider(owner):
     app.state.limiter._limiter.storage.reset()
 
     async def stream(*args):
-        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKlocal').decode(),'excel_filename':'r.xlsx','provider':'gemini','rows_extracted':1,'ai_usage':[]})+'\n\n'
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKlocal').decode(),'excel_filename':'r.xlsx','provider':'claude','rows_extracted':1,'ai_usage':[]})+'\n\n'
 
     with patch('main.stream_timesheet_extraction',stream):
         owner.post('/extract/stream',files={'file':('sem-chamada.pdf',b'%PDF local','application/pdf')})
@@ -193,9 +193,9 @@ def test_reprice_repairs_usd_and_brl_only_rows_and_sums_file(owner, monkeypatch)
         conn.execute('UPDATE extractions SET cost_brl=NULL WHERE id=%s', (extraction_id,))
         reprice_missing(conn, 6.0)
         rows = conn.execute('SELECT cost_usd,cost_brl,usd_brl_rate FROM ai_usage WHERE extraction_id=%s ORDER BY prompt_tokens', (extraction_id,)).fetchall()
-        assert [float(row['cost_usd']) for row in rows] == pytest.approx([0.008, 0.010])
+        assert [float(row['cost_usd']) for row in rows] == pytest.approx([0.00035, 0.00045])
         assert [float(row['usd_brl_rate']) for row in rows] == [5.0, 5.0]
         total = conn.execute('SELECT cost_brl FROM extractions WHERE id=%s', (extraction_id,)).fetchone()['cost_brl']
-        assert float(total) == pytest.approx(0.09)
+        assert float(total) == pytest.approx(0.004)
         reprice_missing(conn, 7.0)
         assert conn.execute('SELECT cost_brl FROM extractions WHERE id=%s', (extraction_id,)).fetchone()['cost_brl'] == total

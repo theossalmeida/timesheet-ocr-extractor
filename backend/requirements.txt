@@ -2,6 +2,7 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 httpx==0.28.1
+anthropic==2.9.0
 pdfplumber==0.11.10
 pypdf==6.18.0
 openpyxl==3.1.5

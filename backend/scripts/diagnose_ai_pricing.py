@@ -41,7 +41,7 @@ def check_running_interpreter():
 
 
 def main():
-    print('GEMINI_MODEL  =', repr(settings.GEMINI_MODEL))
+    print('ANTHROPIC_MODEL  =', repr(settings.ANTHROPIC_MODEL))
     print('USD_BRL_RATE  =', repr(settings.USD_BRL_RATE))
     print()
 
@@ -64,8 +64,8 @@ def main():
     print('   (calls services.ai_pricing.usd_cost directly - the same code finish_extraction runs)')
     from services.ai_pricing import usd_cost
     sample = {
-        'provider': 'gemini',
-        'model': (settings.GEMINI_MODEL or '').strip(),
+        'provider': 'claude',
+        'model': (settings.ANTHROPIC_MODEL or '').strip(),
         'kind': 'extract',
         'metered': True,
         'prompt_tokens': 905,

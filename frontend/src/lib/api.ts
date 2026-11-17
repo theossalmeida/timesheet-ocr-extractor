@@ -198,7 +198,7 @@ export async function extractGuia(
           csvFilename: event.csv_filename as string,
           csvExt: (event.csv_mime as string)?.includes("zip") ? "zip" : "csv",
           rowCount: (event.rows_extracted as number) ?? 0,
-          provider: (event.provider as string) ?? "gemini-guia",
+          provider: (event.provider as string) ?? "claude-guia",
         };
       } else if (event.type === "error") {
         throw new ApiError((event.message as string) ?? "Erro ao processar guias.", 422);

@@ -21,7 +21,7 @@ export interface TimesheetRow {
 
 export interface ExtractionResult {
   rows: TimesheetRow[];
-  provider: "pdfplumber" | "gemini" | "mistral" | "pdfplumber+gemini" | "pdfplumber+mistral";
+  provider: "pdfplumber" | "claude" | "mistral" | "pdfplumber+claude" | "pdfplumber+mistral";
   pdf_type: "native" | "scanned" | "mixed";
   warnings: string[];
   total_rows: number;

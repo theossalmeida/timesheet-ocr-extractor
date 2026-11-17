@@ -40,7 +40,7 @@ def test_full_pipeline_success():
     expected_rows = [TimesheetRow(data="01/03/2024", marcacoes=["08:00", "17:00"])]
 
     with patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("services.mistral_service.normalize_text_with_gemini", AsyncMock(return_value=expected_rows)):
+         patch("services.mistral_service.normalize_text_with_claude", AsyncMock(return_value=expected_rows)):
         rows = asyncio.run(extract_with_mistral(b"fake pdf"))
 
     assert len(rows) == 1
@@ -72,8 +72,8 @@ def test_raises_on_ocr_failure():
             asyncio.run(extract_with_mistral(b"fake"))
 
 
-def test_raises_when_gemini_normalization_fails():
-    from services.gemini_service import GeminiExtractionError
+def test_raises_when_claude_normalization_fails():
+    from services.claude_service import ClaudeExtractionError
 
     upload_r = _make_upload_response()
     ocr_r = _make_ocr_response()
@@ -84,7 +84,7 @@ def test_raises_when_gemini_normalization_fails():
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
     with patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("services.mistral_service.normalize_text_with_gemini",
-               AsyncMock(side_effect=GeminiExtractionError("fail"))):
+         patch("services.mistral_service.normalize_text_with_claude",
+               AsyncMock(side_effect=ClaudeExtractionError("fail"))):
         with pytest.raises(MistralExtractionError):
             asyncio.run(extract_with_mistral(b"fake"))

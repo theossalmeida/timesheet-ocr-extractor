@@ -84,7 +84,7 @@ def build_csv(result: ExtractionResult) -> str:
 def _build_csv_for_rows(rows: list[TimesheetRow]) -> str:
     """Build a PJeCalc CSV string for a single worker's rows."""
     from models.timesheet import ExtractionResult
-    result = ExtractionResult(rows=rows, provider="gemini-guia", pdf_type="scanned")
+    result = ExtractionResult(rows=rows, provider="claude-guia", pdf_type="scanned")
     return build_csv(result)
 
 
