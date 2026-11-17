@@ -7,7 +7,7 @@ import pytest
 from services.guia_ministerial_service import (
     _aggregate,
     _date_sort_key,
-    _process_chunk_gemini,
+    _process_chunk_claude,
     _record_from_row,
     _single_page_pdf,
     _split_pdf_chunks,
@@ -159,7 +159,7 @@ def test_single_page_pdf_extracts_one_page():
     assert len(pypdf.PdfReader(io.BytesIO(page)).pages) == 1
 
 
-# ── routing: local probe decides, Gemini covers what it cannot ────────────────
+# ── routing: local probe decides, Claude covers what it cannot ────────────────
 
 @pytest.mark.anyio
 async def test_reads_the_document_locally_when_the_probe_is_confident():
@@ -171,31 +171,31 @@ async def test_reads_the_document_locally_when_the_probe_is_confident():
     ])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=[])) as gemini_mock:
+         patch("services.guia_ministerial_service._process_chunk_claude",
+               new=AsyncMock(return_value=[])) as claude_mock:
         rows = await extract_with_guia_ministerial(pdf)
 
-    gemini_mock.assert_not_awaited()
+    claude_mock.assert_not_awaited()
     assert [row.data for row in rows] == ["01/03/2024", "02/03/2024", "03/03/2024"]
 
 
 @pytest.mark.anyio
-async def test_sends_the_whole_document_to_gemini_when_the_probe_is_weak():
+async def test_sends_the_whole_document_to_claude_when_the_probe_is_weak():
     pdf = _make_minimal_pdf(20)
     run = _local_run([], confidence=0.83, passed=False, reason="probe confidence 83%")
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=[_guia_record()])) as gemini_mock:
+         patch("services.guia_ministerial_service._process_chunk_claude",
+               new=AsyncMock(return_value=[_guia_record()])) as claude_mock:
         rows = await extract_with_guia_ministerial(pdf, chunk_size=10)
 
-    assert gemini_mock.await_count == 2  # one call per chunk of the whole file
+    assert claude_mock.await_count == 2  # one call per chunk of the whole file
     assert rows[0].marcacoes == ["08:00", "17:00"]
 
 
 @pytest.mark.anyio
 async def test_retries_only_the_page_the_local_model_could_not_read():
-    """A late failure costs one page of Gemini, not the whole document."""
+    """A late failure costs one page of Claude, not the whole document."""
 
     pdf = _make_minimal_pdf(3)
     run = _local_run([
@@ -205,24 +205,24 @@ async def test_retries_only_the_page_the_local_model_could_not_read():
     ])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=[_guia_record("02/03/2024")])) as gemini_mock:
+         patch("services.guia_ministerial_service._process_chunk_claude",
+               new=AsyncMock(return_value=[_guia_record("02/03/2024")])) as claude_mock:
         rows = await extract_with_guia_ministerial(pdf)
 
-    gemini_mock.assert_awaited_once()
-    retried = gemini_mock.await_args.args[0]
+    claude_mock.assert_awaited_once()
+    retried = claude_mock.await_args.args[0]
     assert len(pypdf.PdfReader(io.BytesIO(retried)).pages) == 1
     assert [row.data for row in rows] == ["01/03/2024", "02/03/2024", "03/03/2024"]
 
 
 @pytest.mark.anyio
-async def test_uses_gemini_when_local_vision_is_unavailable():
+async def test_uses_claude_when_local_vision_is_unavailable():
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=None)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=[_guia_record()])) as gemini_mock:
+         patch("services.guia_ministerial_service._process_chunk_claude",
+               new=AsyncMock(return_value=[_guia_record()])) as claude_mock:
         rows = await extract_with_guia_ministerial(_make_minimal_pdf(1))
 
-    gemini_mock.assert_awaited_once()
+    claude_mock.assert_awaited_once()
     assert len(rows) == 1
 
 
@@ -239,7 +239,7 @@ async def test_never_reads_a_guia_with_text_ocr():
     footer = [(1, "Documento assinado eletronicamente por FULANO, em 28/08/2026, as 13:25:53")]
     with patch.object(tesseract, "ocr_pdf_page_texts", return_value=footer) as ocr_mock, \
          patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=None)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
+         patch("services.guia_ministerial_service._process_chunk_claude",
                new=AsyncMock(return_value=[])):
         rows = await extract_with_guia_ministerial(_make_minimal_pdf(1))
 
@@ -279,11 +279,11 @@ async def test_stream_reports_local_as_the_provider_when_the_probe_passes():
     run = _local_run([(1, _guia_record())])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
-               new=AsyncMock(return_value=[])) as gemini_mock:
+         patch("services.guia_ministerial_service._process_chunk_claude",
+               new=AsyncMock(return_value=[])) as claude_mock:
         events = await _stream_events(_make_minimal_pdf(1))
 
-    gemini_mock.assert_not_awaited()
+    claude_mock.assert_not_awaited()
     assert events[-1]["provider"] == "local-vision-guia"
     assert events[-1]["rows_extracted"] == 1
 
@@ -293,16 +293,16 @@ async def test_stream_reports_both_providers_when_a_page_falls_back():
     run = _local_run([(1, _guia_record("01/03/2024")), (2, None)])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini",
+         patch("services.guia_ministerial_service._process_chunk_claude",
                new=AsyncMock(return_value=[_guia_record("02/03/2024")])):
         events = await _stream_events(_make_minimal_pdf(2))
 
-    assert events[-1]["provider"] == "local-vision-guia+gemini-guia"
+    assert events[-1]["provider"] == "local-vision-guia+claude-guia"
     assert events[-1]["rows_extracted"] == 2
 
 
 @pytest.mark.anyio
-async def test_gemini_reads_one_guia_page_per_request():
+async def test_claude_reads_one_guia_page_per_request():
     """Each guia is a self-contained form: two on one request invites bleed."""
 
     seen = []
@@ -311,9 +311,9 @@ async def test_gemini_reads_one_guia_page_per_request():
         seen.append(chunk_size)
         return []
 
-    with patch("services.gemini_service.extract_with_gemini_adaptive", new=fake_adaptive), \
-         patch("services.gemini_service.is_gemini_configured", return_value=True):
-        await _process_chunk_gemini(_make_minimal_pdf(4))
+    with patch("services.claude_service.extract_with_claude_adaptive", new=fake_adaptive), \
+         patch("services.claude_service.is_claude_configured", return_value=True):
+        await _process_chunk_claude(_make_minimal_pdf(4))
 
     assert seen == [1]
 
@@ -321,10 +321,10 @@ async def test_gemini_reads_one_guia_page_per_request():
 # ── concurrency ──────────────────────────────────────────────────────────────
 
 def _concurrency_probe(records, delay=0.02):
-    """A fake Gemini chunk call that records how many ran at the same time."""
+    """A fake Claude chunk call that records how many ran at the same time."""
     state = {"running": 0, "peak": 0}
 
-    async def fake_gemini(chunk_bytes, semaphore=None):
+    async def fake_claude(chunk_bytes, semaphore=None):
         import asyncio
 
         state["running"] += 1
@@ -335,16 +335,16 @@ def _concurrency_probe(records, delay=0.02):
         finally:
             state["running"] -= 1
 
-    return fake_gemini, state
+    return fake_claude, state
 
 
 @pytest.mark.anyio
 async def test_stream_reads_chunks_concurrently():
     weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
-    fake_gemini, state = _concurrency_probe([_guia_record()])
+    fake_claude, state = _concurrency_probe([_guia_record()])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         events = await _stream_events(_make_minimal_pdf(6), chunk_size=2)
 
     assert state["peak"] > 1, "chunks must overlap instead of running one after another"
@@ -354,10 +354,10 @@ async def test_stream_reads_chunks_concurrently():
 @pytest.mark.anyio
 async def test_stream_retries_unread_pages_concurrently():
     run = _local_run([(1, None), (2, None), (3, None)])
-    fake_gemini, state = _concurrency_probe([_guia_record()])
+    fake_claude, state = _concurrency_probe([_guia_record()])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=run)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         events = await _stream_events(_make_minimal_pdf(3))
 
     assert state["peak"] > 1
@@ -369,10 +369,10 @@ async def test_stream_progress_counts_completions_not_positions():
     """Chunks finish out of order, so progress must only ever move forward."""
 
     weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
-    fake_gemini, _ = _concurrency_probe([_guia_record()])
+    fake_claude, _ = _concurrency_probe([_guia_record()])
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         events = await _stream_events(_make_minimal_pdf(6), chunk_size=2)
 
     counted = [e for e in events if e.get("phase") == "processing"]
@@ -392,12 +392,12 @@ async def test_stream_shares_one_concurrency_budget_across_chunks():
     weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
     seen = []
 
-    async def fake_gemini(chunk_bytes, semaphore=None):
+    async def fake_claude(chunk_bytes, semaphore=None):
         seen.append(semaphore)
         return []
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         await _stream_events(_make_minimal_pdf(6), chunk_size=2)
 
     assert len(seen) > 1
@@ -405,23 +405,23 @@ async def test_stream_shares_one_concurrency_budget_across_chunks():
 
 
 @pytest.mark.anyio
-async def test_stream_meters_gemini_and_reports_it_as_the_provider():
+async def test_stream_meters_claude_and_reports_it_as_the_provider():
     from services import ai_usage
 
-    async def fake_gemini(chunk_bytes, semaphore=None):
-        ai_usage.record("gemini", "gemini-3.8-flash", "extract",
+    async def fake_claude(chunk_bytes, semaphore=None):
+        ai_usage.record("claude", "claude-haiku-5-5", "extract",
                         {"prompt_tokens": 1000, "cached_tokens": 0, "output_tokens": 500,
                          "thought_tokens": 0, "total_tokens": 1500})
         return [_guia_record()]
 
     weak = _local_run([], confidence=0.5, passed=False, reason="probe confidence 50%")
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         events = await _stream_events(_make_minimal_pdf(1))
 
     done = events[-1]
     assert done["type"] == "done"
-    assert done["provider"] == "gemini-guia"
+    assert done["provider"] == "claude-guia"
     assert done["rows_extracted"] == 1
     # The cost of the call travels with the result so it can be billed.
     assert [call["prompt_tokens"] for call in done["ai_usage"]] == [1000]

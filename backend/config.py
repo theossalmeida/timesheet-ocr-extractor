@@ -17,12 +17,12 @@ class Settings(BaseSettings):
     # Tesseract could not read. Every call is metered and priced per token
     # (services/ai_usage.py, services/ai_pricing.py), so the model name must
     # match one litellm knows a price for.
-    GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.8-flash"
-    # How many Gemini requests a single document may have in flight. The account
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-haiku-5-5"
+    # How many Claude requests a single document may have in flight. The account
     # allows 2000 requests/minute, far more than one document ever needs, so this
     # is sized to bound memory and open sockets rather than to stay under quota.
-    GEMINI_MAX_CONCURRENT_CHUNKS: int = 32
+    ANTHROPIC_MAX_CONCURRENT_CHUNKS: int = 32
     MISTRAL_API_KEY: str = ""
     GOOGLE_CLOUD_API_KEY: str = ""
     # Fallback USD/BRL rate used to price AI usage when the daily quote cannot
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # machines. Leave empty to rely on PATH resolution (the default in Docker/
     # Fly.io, where apt-get installs it onto PATH already).
     TESSERACT_CMD: str = ""
-    # Optional free fallback for scanned/handwritten pages, tried after Gemini.
+    # Optional free fallback for scanned/handwritten pages, tried after Claude.
     # Expected to be LM Studio/OpenAI-compatible or Ollama. It runs on the same
     # Windows host as the services, so this is normally http://127.0.0.1:1234 -
     # note the model server must run as a service too, or it disappears when

@@ -105,7 +105,7 @@ def test_duplicate_upload_reuses_the_existing_result(owner):
 
     async def stream(*args):
         calls.append(args)
-        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKidempotent').decode(),'excel_filename':'r.xlsx','provider':'gemini-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKidempotent').decode(),'excel_filename':'r.xlsx','provider':'claude-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
 
     with patch('main.stream_guia_extraction',stream):
         first_upload = owner.post('/uploads',json={'filename':'guia.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']
@@ -138,7 +138,7 @@ def test_duplicate_detection_is_scoped_to_team_and_mode(owner):
     pdf = b'%PDF idempotent scope check'
 
     async def stream(*args):
-        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKscoped').decode(),'excel_filename':'r.xlsx','provider':'gemini-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
+        yield 'data: '+json.dumps({'type':'done','excel_b64':base64.b64encode(b'PKscoped').decode(),'excel_filename':'r.xlsx','provider':'claude-guia','rows_extracted':1,'ai_usage':[]})+'\n\n'
 
     with patch('main.stream_guia_extraction',stream):
         upload = owner.post('/uploads',json={'filename':'a.pdf','mode':'guia','size_bytes':len(pdf)}).json()['id']

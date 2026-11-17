@@ -34,21 +34,21 @@ class ExtractionResult(BaseModel):
     provider: Literal[
         "pdfplumber",
         "tesseract",
-        "gemini",
+        "claude",
         "local-vision",
         "pdfplumber+tesseract",
-        "pdfplumber+gemini",
+        "pdfplumber+claude",
         "pdfplumber+local-vision",
-        "pdfplumber+tesseract+gemini",
+        "pdfplumber+tesseract+claude",
         "pdfplumber+tesseract+local-vision",
         "tesseract-guia",
-        "gemini-guia",
+        "claude-guia",
         "local-vision-guia",
-        "tesseract-guia+gemini-guia",
+        "tesseract-guia+claude-guia",
         "tesseract-guia+local-vision-guia",
-        "gemini-guia+local-vision-guia",
-        "local-vision-guia+gemini-guia",
-        "tesseract-guia+gemini-guia+local-vision-guia",
+        "claude-guia+local-vision-guia",
+        "local-vision-guia+claude-guia",
+        "tesseract-guia+claude-guia+local-vision-guia",
         "tesseract-guia+local-vision",
     ]
     pdf_type: Literal["native", "scanned", "mixed"]
@@ -63,7 +63,7 @@ class ExtractionResult(BaseModel):
 class ExtractResponse(BaseModel):
     filename: str
     rows_extracted: int
-    provider: Literal["pdfplumber", "tesseract", "gemini", "local-vision", "pdfplumber+tesseract", "pdfplumber+gemini", "pdfplumber+local-vision"]
+    provider: Literal["pdfplumber", "tesseract", "claude", "local-vision", "pdfplumber+tesseract", "pdfplumber+claude", "pdfplumber+local-vision"]
     pdf_type: Literal["native", "scanned", "mixed"]
     warnings: list[str] = []
     download_url: str | None = None

@@ -44,12 +44,12 @@ def _phases(events: list[dict]) -> list[str]:
 # ── frame shape ──────────────────────────────────────────────────────────────
 
 def test_every_progress_frame_carries_a_phase_and_countable_units():
-    frame = json.loads(progress.processing(2, 5, step="gemini")[6:])
+    frame = json.loads(progress.processing(2, 5, step="claude")[6:])
 
     assert frame["type"] == "progress"
     assert frame["phase"] == progress.PROCESSING
     assert (frame["chunk"], frame["total"]) == (2, 5)
-    assert frame["step"] == "gemini"
+    assert frame["step"] == "claude"
 
 
 def test_a_stage_with_nothing_to_count_still_reports_one_unit():
@@ -172,14 +172,14 @@ async def test_processing_counts_never_go_backwards():
     weak = GuiaLocalRun(0.5, False, [], "probe confidence 50%")
     record = {"data": "01/03/2024", "entrada": "08:00", "saida": "17:00"}
 
-    async def fake_gemini(chunk_bytes, semaphore=None):
+    async def fake_claude(chunk_bytes, semaphore=None):
         import asyncio
 
         await asyncio.sleep(0.01)
         return [record]
 
     with patch("services.guia_ministerial_service._run_local", new=AsyncMock(return_value=weak)), \
-         patch("services.guia_ministerial_service._process_chunk_gemini", new=fake_gemini):
+         patch("services.guia_ministerial_service._process_chunk_claude", new=fake_claude):
         events = await _events(stream_guia_extraction(_pdf(6), "doc", chunk_size=2))
 
     counts = [e["chunk"] for e in events if e.get("phase") == progress.PROCESSING]

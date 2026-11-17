@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 from config import settings
 from models.timesheet import TimesheetRow
-from services.gemini_service import normalize_text_with_gemini
+from services.claude_service import normalize_text_with_claude
 
 MISTRAL_FILES_URL = "https://api.mistral.ai/v1/files"
 MISTRAL_OCR_URL = "https://api.mistral.ai/v1/ocr"
@@ -58,8 +58,8 @@ async def extract_with_mistral(pdf_bytes: bytes) -> list[TimesheetRow]:
     full_markdown = "\n\n".join(p.get("markdown", "") for p in pages)
     logger.info("Mistral OCR complete — pages=%d total_chars=%d", len(pages), len(full_markdown))
 
-    # Phase 3: normalize via Gemini
+    # Phase 3: normalize via Claude
     try:
-        return await normalize_text_with_gemini(full_markdown)
+        return await normalize_text_with_claude(full_markdown)
     except Exception as e:
-        raise MistralExtractionError(f"Gemini normalization after Mistral OCR failed: {e}") from e
+        raise MistralExtractionError(f"Claude normalization after Mistral OCR failed: {e}") from e

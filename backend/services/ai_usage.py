@@ -1,16 +1,16 @@
 """Context-local ledger of paid AI calls.
 
-Gemini bills per token and one document is rarely one call: the adaptive
+Claude bills per token and one document is rarely one call: the adaptive
 extractor splits the PDF into 2-page chunks and falls back to single-page
 calls, so the cost of a document is the sum of the calls it actually made -
-including calls whose answer we ended up discarding, because Google bills those
+including calls whose answer we ended up discarding, because Anthropic bills those
 too. Every call is appended here as it happens; pricing runs later
 (services/ai_pricing.py) and each call is stored in the ai_usage table.
 
 Usage:
 
     with ai_usage.recording() as calls:
-        ...                     # anything that may reach Gemini
+        ...                     # anything that may reach Claude
     # calls is now one dict per HTTP call, in order.
 """
 from __future__ import annotations
@@ -41,31 +41,27 @@ def recording() -> Iterator[list[dict]]:
         _calls.reset(token)
 
 
-def usage_from_gemini(response_json: dict) -> dict | None:
-    """Token counts from a generateContent response, or None when absent.
+def usage_from_claude(usage: object) -> dict | None:
+    """Token counts from a Messages API `usage` object, or None when absent.
 
     None means the call happened but we cannot say what it cost - the caller
     records it as unmetered so the document reports an unknown cost instead of
     a falsely cheap one.
     """
-    meta = response_json.get("usageMetadata")
-    if not isinstance(meta, dict) or not meta:
+    if usage is None:
         return None
 
-    prompt = int(meta.get("promptTokenCount") or 0)
-    tool_use = int(meta.get("toolUsePromptTokenCount") or 0)
-    candidates = int(meta.get("candidatesTokenCount") or 0)
-    thoughts = int(meta.get("thoughtsTokenCount") or 0)
-    cached = int(meta.get("cachedContentTokenCount") or 0)
+    uncached = int(getattr(usage, "input_tokens", 0) or 0)
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    output = int(getattr(usage, "output_tokens", 0) or 0)
+    prompt = uncached + cache_read + cache_write
     return {
-        "prompt_tokens": prompt + tool_use,
-        # Reported inside promptTokenCount, but billed at the cheaper cached rate.
-        "cached_tokens": cached,
-        # Thinking tokens are billed at the output rate and are reported
-        # outside candidatesTokenCount.
-        "output_tokens": candidates + thoughts,
-        "thought_tokens": thoughts,
-        "total_tokens": int(meta.get("totalTokenCount") or (prompt + tool_use + candidates + thoughts)),
+        "prompt_tokens": prompt,
+        "cached_tokens": cache_read,
+        "output_tokens": output,
+        "thought_tokens": 0,
+        "total_tokens": prompt + output,
     }
 
 
