@@ -26,10 +26,16 @@ FREQUENCY_OCR_CHUNK_SIZE = 5
 
 SCALE_PATTERN = r"FOLG|LIVR|HXGU|HXHI|HX01|HS\d+|HT\d+"
 
+# A daily row ends with a schedule annotation ("Sobreaviso" or "Turno de N
+# Horas"). In some report layouts pdfplumber/pypdf wrap the trailing "Horas"
+# word onto the next physical line, leaving the day line itself ending at
+# "Turno de N"; the word is therefore optional so wrapped rows still anchor.
+ROW_END_ANCHOR = r"(?:Sobreaviso|Turno\s+de\s+\d+(?:\s+Hor\s*as)?)$"
+
 DATE_ROW_RE = re.compile(
     r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
     rf"(?P<scale>{SCALE_PATTERN})\b(?P<details>.*?)"
-    r"(?:Sobreaviso|Turno\s+de\s+\d+\s+Hor\s*as)$",
+    rf"{ROW_END_ANCHOR}",
     re.IGNORECASE,
 )
 DAY_ONLY_ROW_RE = re.compile(
@@ -40,7 +46,7 @@ DAY_ONLY_ROW_RE = re.compile(
 VACATION_DATE_ROW_RE = re.compile(
     r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
     r"(?P<details>(?:\d{2}:\d{2}\s+)?1019\b.*?)"
-    r"(?:Sobreaviso|Turno\s+de\s+\d+\s+Hor\s*as)$",
+    rf"{ROW_END_ANCHOR}",
     re.IGNORECASE,
 )
 VACATION_DAY_ONLY_ROW_RE = re.compile(
@@ -59,7 +65,7 @@ VACATION_DAY_ONLY_ROW_RE = re.compile(
 DATE_ROW_LOOSE_RE = re.compile(
     r"^(?P<day>\d{2})/(?P<month>\d{2})\s+\S+\s+"
     r"(?P<scale>\S+)\b(?P<details>.*?)"
-    r"(?:Sobreaviso|Turno\s+de\s+\d+\s+Hor\s*as)$",
+    rf"{ROW_END_ANCHOR}",
     re.IGNORECASE,
 )
 DAY_ONLY_ROW_LOOSE_RE = re.compile(
